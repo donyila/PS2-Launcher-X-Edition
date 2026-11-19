@@ -5,6 +5,7 @@
 */
 
 #include "include/opl.h"
+#include "include/profiles.h"
 #include "include/ioman.h"
 #include "include/gui.h"
 #include "include/guigame.h"
@@ -790,6 +791,46 @@ static void deinitAllSupport(int exception, int modeSelected)
         if (list_support[i].support != NULL)
             moduleCleanup(&list_support[i], exception, modeSelected, selectedBdmHdd);
     }
+}
+
+// Returns the root of the BDM device that currently holds the game list
+// (e.g. "mass0:/"). Used by the profile system so its data lives on the same
+// USB device as the games.
+int oplGetGameDeviceRoot(char *out, int len)
+{
+    int i;
+
+    if (out == NULL || len < 8)
+        return 0;
+
+    for (i = BDM_MODE; i <= BDM_MODE4; i++) {
+        item_list_t *support = list_support[i].support;
+        bdm_device_data_t *data;
+        const char *colon;
+        int length;
+
+        if (support == NULL || support->priv == NULL)
+            continue;
+
+        data = (bdm_device_data_t *)support->priv;
+        if (data->bdmPrefix[0] == '\0')
+            continue;
+
+        colon = strchr(data->bdmPrefix, ':');
+        if (colon == NULL)
+            continue;
+
+        length = (int)(colon - data->bdmPrefix) + 1; // include ':'
+        if (length + 2 > len)
+            continue;
+
+        memcpy(out, data->bdmPrefix, length);
+        out[length] = '/';
+        out[length + 1] = '\0';
+        return 1;
+    }
+
+    return 0;
 }
 
 // For resolving the mode, given an app's path
@@ -3420,6 +3461,17 @@ int main(int argc, char *argv[])
     ioPutRequest(IO_CUSTOM_SIMPLEACTION, &deferredInit);
 
     guiIntroLoop();
+
+    // The profile selection screen comes after storage/BDM initialisation (which
+    // happens during the intro) and before the normal game browser. Auto-launch
+    // runs without a profile, exactly like the legacy launcher.
+    if (gAutoLaunchBDMGame == NULL && gAutoLaunchGame == NULL) {
+        if (profilesInit())
+            profilesShowSelection();
+        else
+            LOG("PROFILES Unavailable; continuing with the legacy VMC behaviour\n");
+    }
+
     guiMainLoop();
 
     return 0;

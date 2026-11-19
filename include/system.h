@@ -24,5 +24,7 @@ int sysExecElf(const char *path);
 int sysLoadModuleBuffer(void *buffer, int size, int argc, char *argv);
 int sysCheckMC(void);
 int sysCheckVMC(const char *prefix, const char *sep, char *name, int createSize, vmc_superblock_t *vmc_superblock);
+int sysCheckVMCPath(const char *path, int createSize, vmc_superblock_t *vmc_superblock);
+int sysCreateVMCFile(const char *path, int sizeMB);
 
 #endif

@@ -1079,12 +1079,41 @@ int sysCheckMC(void)
     return -11;
 }
 
+int sysCreateVMCFile(const char *path, int sizeMB)
+{
+    createVMCparam_t createParam;
+
+    if (path == NULL || path[0] == '\0' || sizeMB <= 0)
+        return -1;
+    if (strlen(path) >= sizeof(createParam.VMC_filename))
+        return -1;
+
+    strcpy(createParam.VMC_filename, path);
+    createParam.VMC_size_mb = sizeMB;
+    createParam.VMC_blocksize = 16;
+    createParam.VMC_thread_priority = 0x0f;
+    createParam.VMC_card_slot = -1;
+
+    return fileXioDevctl("genvmc:", 0xC0DE0001, (void *)&createParam, sizeof(createParam), NULL, 0);
+}
+
 // createSize == -1 : delete, createSize == 0 : probing, createSize > 0 : creation
 int sysCheckVMC(const char *prefix, const char *sep, char *name, int createSize, vmc_superblock_t *vmc_superblock)
 {
-    int size = -1;
     char path[256];
     snprintf(path, sizeof(path), "%sVMC%s%s.bin", prefix, sep, name);
+
+    return sysCheckVMCPath(path, createSize, vmc_superblock);
+}
+
+// Path-based variant used by the profile system, where the VMC does not live
+// under the game's <device>/VMC directory.
+int sysCheckVMCPath(const char *path, int createSize, vmc_superblock_t *vmc_superblock)
+{
+    int size = -1;
+
+    if (path == NULL || path[0] == '\0')
+        return -1;
 
     if (createSize == -1)
         unlink(path);
@@ -1124,15 +1153,8 @@ int sysCheckVMC(const char *prefix, const char *sep, char *name, int createSize,
         }
 
 
-        if (createSize && (createSize != size)) {
-            createVMCparam_t createParam;
-            strcpy(createParam.VMC_filename, path);
-            createParam.VMC_size_mb = createSize;
-            createParam.VMC_blocksize = 16;
-            createParam.VMC_thread_priority = 0x0f;
-            createParam.VMC_card_slot = -1;
-            fileXioDevctl("genvmc:", 0xC0DE0001, (void *)&createParam, sizeof(createParam), NULL, 0);
-        }
+        if (createSize && (createSize != size))
+            sysCreateVMCFile(path, createSize);
     }
     return size;
 }

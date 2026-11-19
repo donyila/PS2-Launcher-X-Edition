@@ -8,6 +8,7 @@
 #include "include/textures.h"
 #include "include/ioman.h"
 #include "include/system.h"
+#include "include/profiles.h"
 #include "include/extern_irx.h"
 #include "include/cheatman.h"
 #include "include/sound.h"
@@ -502,13 +503,57 @@ static void bdmRenameGame(item_list_t *itemList, int id, char *newName)
     pDeviceData->ForceRefresh = 1;
 }
 
+// Build the mcemu card descriptor from a validated VMC file and verify the USB
+// cluster chain (USB VMCs have to be contiguous).
+// Returns 0 when usable, 1 for a generic error and 2 when fragmented.
+static int bdmPrepareVMCInfo(vmc_superblock_t *vmc_superblock, int vmcSizeInMb, const char *vmc_path, int vmc_id, bdm_vmc_infos_t *bdm_vmc_infos)
+{
+    int fd, iop_fd, result = 1;
+    u64 startingLBA;
+    unsigned int startCluster;
+
+    bdm_vmc_infos->flags = vmc_superblock->mc_flag & 0xFF;
+    bdm_vmc_infos->flags |= 0x100;
+    bdm_vmc_infos->specs.page_size = vmc_superblock->page_size;
+    bdm_vmc_infos->specs.block_size = vmc_superblock->pages_per_block;
+    bdm_vmc_infos->specs.card_size = vmc_superblock->pages_per_cluster * vmc_superblock->clusters_per_card;
+
+    fd = open(vmc_path, O_RDONLY);
+    if (fd >= 0) {
+        iop_fd = ps2sdk_get_iop_fd(fd);
+        if (fileXioIoctl2(iop_fd, USBMASS_IOCTL_GET_LBA, NULL, 0, &startingLBA, sizeof(startingLBA)) == 0 && (startCluster = (unsigned int)fileXioIoctl(iop_fd, USBMASS_IOCTL_GET_CLUSTER, (void *)vmc_path)) != 0) {
+
+            // VMC only supports 32bit LBAs at the moment, so if the starting LBA + size of the VMC crosses the 32bit boundary
+            // just report the VMC as being fragmented to prevent file system corruption.
+            int vmcSectorCount = vmcSizeInMb * ((1024 * 1024) / 512); // size in MB * sectors per MB
+            if (startingLBA + vmcSectorCount > 0x100000000) {
+                LOG("BDMSUPPORT VMC bad LBA range\n");
+                result = 2;
+            }
+            // Check VMC cluster chain for fragmentation (write operation can cause damage to the filesystem).
+            else if (fileXioIoctl(iop_fd, USBMASS_IOCTL_CHECK_CHAIN, "") == 1) {
+                LOG("BDMSUPPORT Cluster Chain OK\n");
+                result = 0;
+                bdm_vmc_infos->active = 1;
+                bdm_vmc_infos->start_sector = startingLBA;
+                LOG("BDMSUPPORT VMC slot %d start: 0x%08x%08x\n", vmc_id, ((u32 *)&startingLBA)[1], ((u32 *)&startingLBA)[0]);
+            } else {
+                LOG("BDMSUPPORT Cluster Chain NG\n");
+                result = 2;
+            }
+        }
+
+        close(fd);
+    }
+
+    return result;
+}
+
 void bdmLaunchGame(item_list_t *itemList, int id, config_set_t *configSet)
 {
     int i, fd, iop_fd, index, compatmask = 0;
     int EnablePS2Logo = 0;
     int result;
-    u64 startingLBA;
-    unsigned int startCluster;
     char partname[256], filename[32];
     base_game_info_t *game;
     struct cdvdman_settings_bdm *settings;
@@ -535,50 +580,49 @@ void bdmLaunchGame(item_list_t *itemList, int id, config_set_t *configSet)
     bdm_vmc_infos_t bdm_vmc_infos;
     vmc_superblock_t vmc_superblock;
 
+    // When a profile is active, the game's VMC lives in the profile's own VMC
+    // directory. Auto-launch keeps the legacy behaviour (no profile selected).
+    int useProfileVMC = 0;
+    if (profilesGetActiveId() > 0 && gAutoLaunchBDMGame == NULL) {
+        if (!profilesDeviceMatches(pDeviceData->bdmPrefix)) {
+            guiMsgBox("This game is not on the USB device that stores the active profile.\nLaunch cancelled to protect save data.", 0, NULL);
+            return;
+        }
+        useProfileVMC = 1;
+    }
+
     for (vmc_id = 0; vmc_id < 2; vmc_id++) {
         memset(&bdm_vmc_infos, 0, sizeof(bdm_vmc_infos_t));
         configGetVMC(configSet, vmc_name, sizeof(vmc_name), vmc_id);
-        if (vmc_name[0]) {
+        vmc_path[0] = '\0';
+
+        if (useProfileVMC) {
+            // Slot 2 is reserved for a future update of the profile system.
+            if (vmc_id != 0)
+                continue;
+
+            have_error = 1;
+            if (!profilesGetVMCFile(game->startup, vmc_name, vmc_id, vmc_path, sizeof(vmc_path))) {
+                guiMsgBox("Could not resolve this profile's VMC path.\nCheck the USB device.", 0, NULL);
+                return;
+            }
+
+            int vmcSizeInMb = profilesPrepareVMC(vmc_path, &vmc_superblock);
+            if (vmcSizeInMb > 0)
+                have_error = bdmPrepareVMCInfo(&vmc_superblock, vmcSizeInMb, vmc_path, vmc_id, &bdm_vmc_infos);
+
+            if (have_error) {
+                char error[256];
+                snprintf(error, sizeof(error), "Could not prepare the profile VMC.\nThe game was not launched to protect save data.\n%s", vmc_path);
+                guiMsgBox(error, 0, NULL);
+                return;
+            }
+        } else if (vmc_name[0]) {
             have_error = 1;
             int vmcSizeInMb = sysCheckVMC(pDeviceData->bdmPrefix, "/", vmc_name, 0, &vmc_superblock);
             if (vmcSizeInMb > 0) {
-                bdm_vmc_infos.flags = vmc_superblock.mc_flag & 0xFF;
-                bdm_vmc_infos.flags |= 0x100;
-                bdm_vmc_infos.specs.page_size = vmc_superblock.page_size;
-                bdm_vmc_infos.specs.block_size = vmc_superblock.pages_per_block;
-                bdm_vmc_infos.specs.card_size = vmc_superblock.pages_per_cluster * vmc_superblock.clusters_per_card;
-
                 sprintf(vmc_path, "%sVMC/%s.bin", pDeviceData->bdmPrefix, vmc_name);
-
-                fd = open(vmc_path, O_RDONLY);
-                if (fd >= 0) {
-                    iop_fd = ps2sdk_get_iop_fd(fd);
-                    if (fileXioIoctl2(iop_fd, USBMASS_IOCTL_GET_LBA, NULL, 0, &startingLBA, sizeof(startingLBA)) == 0 && (startCluster = (unsigned int)fileXioIoctl(iop_fd, USBMASS_IOCTL_GET_CLUSTER, vmc_path)) != 0) {
-
-                        // VMC only supports 32bit LBAs at the moment, so if the starting LBA + size of the VMC crosses the 32bit boundary
-                        // just report the VMC as being fragmented to prevent file system corruption.
-                        int vmcSectorCount = vmcSizeInMb * ((1024 * 1024) / 512); // size in MB * sectors per MB
-                        if (startingLBA + vmcSectorCount > 0x100000000) {
-                            LOG("BDMSUPPORT VMC bad LBA range\n");
-                            have_error = 2;
-                        }
-                        // Check VMC cluster chain for fragmentation (write operation can cause damage to the filesystem).
-                        else if (fileXioIoctl(iop_fd, USBMASS_IOCTL_CHECK_CHAIN, "") == 1) {
-                            LOG("BDMSUPPORT Cluster Chain OK\n");
-                            have_error = 0;
-                            bdm_vmc_infos.active = 1;
-                            bdm_vmc_infos.start_sector = startingLBA;
-                            LOG("BDMSUPPORT VMC slot %d start: 0x%08x%08x\n", vmc_id, ((u32 *)&startingLBA)[1], ((u32 *)&startingLBA)[0]);
-                        } else {
-                            LOG("BDMSUPPORT Cluster Chain NG\n");
-                            have_error = 2;
-                        }
-                    } else {
-                    }
-
-                    close(fd);
-                } else {
-                }
+                have_error = bdmPrepareVMCInfo(&vmc_superblock, vmcSizeInMb, vmc_path, vmc_id, &bdm_vmc_infos);
             }
         }
 
@@ -879,6 +923,13 @@ static void bdmShutdown(item_list_t *itemList)
 static int bdmCheckVMC(item_list_t *itemList, char *name, int createSize)
 {
     bdm_device_data_t *pDeviceData = (bdm_device_data_t *)itemList->priv;
+    char path[PROFILE_PATH_MAX];
+
+    // With an active profile, the VMC settings dialog must check/create/delete
+    // the profile's own copy instead of the shared <device>/VMC file.
+    if (profilesGetActiveId() > 0 && profilesGetVMCFilePath(name, path, sizeof(path)))
+        return sysCheckVMCPath(path, createSize, NULL);
+
     return sysCheckVMC(pDeviceData->bdmPrefix, "/", name, createSize, NULL);
 }
 
