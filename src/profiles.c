@@ -170,16 +170,17 @@ static int profilesEnsureDir(const char *path)
     return profilesDirExists(path);
 }
 
+// All profile paths are built by include/profiles_path.h. Keeping a single
+// implementation is what prevents duplicated directory components (the old
+// code appended "/USERS/" to a base that already ended in "/USERS").
 static int profilesBuildProfileDir(int id, char *path, int length)
 {
-    int result = snprintf(path, length, "%s/%06d", profilesUsers, id);
-    return (result > 0 && result < length);
+    return profilesPathUser(path, length, profilesRoot, id);
 }
 
 static int profilesBuildVMCDir(int id, char *path, int length)
 {
-    int result = snprintf(path, length, "%s/%06d/VMC", profilesUsers, id);
-    return (result > 0 && result < length);
+    return profilesPathVmcDir(path, length, profilesRoot, id);
 }
 
 static int profilesEnsureProfileDirs(int id)
@@ -222,61 +223,14 @@ int profilesFindIndex(int id)
 
 int profilesIsValidName(const char *name)
 {
-    int i, length;
-
-    if (name == NULL)
-        return 0;
-
-    length = strlen(name);
-    if (length < 1 || length > PROFILE_NAME_MAX)
-        return 0;
-
-    if (name[0] == ' ' || name[length - 1] == ' ')
-        return 0;
-
-    for (i = 0; i < length; i++) {
-        unsigned char c = (unsigned char)name[i];
-
-        if (c < 0x20 || c > 0x7E)
-            return 0;
-        if (c == '|' || c == '/' || c == '\\' || c == ':')
-            return 0;
-    }
-
-    return 1;
+    return profilesNameIsValid(name);
 }
 
-// Produces a FAT-safe, path-traversal-safe VMC name. Invalid characters are
-// replaced, never used to build a directory.
+// VMC names are sanitized by the shared path module so the name used for the
+// file is always the exact same one used while constructing its path.
 static int profilesSanitizeVMCName(const char *input, char *output, int outputLen)
 {
-    int i, out = 0;
-
-    if (input == NULL || output == NULL || outputLen < 2)
-        return 0;
-
-    for (i = 0; input[i] != '\0' && out < outputLen - 1; i++) {
-        unsigned char c = (unsigned char)input[i];
-
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
-            output[out++] = (char)c;
-        } else if (c == ' ') {
-            output[out++] = '_';
-        } else {
-            output[out++] = '_';
-        }
-    }
-
-    output[out] = '\0';
-
-    // Trim characters that FAT does not accept at the end of a name.
-    while (out > 0 && (output[out - 1] == '.' || output[out - 1] == ' ' || output[out - 1] == '_'))
-        output[--out] = '\0';
-
-    if (out == 0 || strcmp(output, ".") == 0 || strcmp(output, "..") == 0)
-        return 0;
-
-    return 1;
+    return profilesNameSanitizeVmc(input, output, outputLen);
 }
 
 static const char *profilesFindVMCMap(profile_entry_t *profile, const char *gameId)
@@ -307,11 +261,8 @@ static int profilesReadIni(profile_entry_t *profile, int useNameFallback)
 
     profile->vmcMapCount = 0;
 
-    if (!profilesBuildProfileDir(profile->id, path, sizeof(path)))
+    if (!profilesPathIni(path, sizeof(path), profilesRoot, profile->id))
         return 0;
-    if ((int)strlen(path) + 12 >= (int)sizeof(path))
-        return 0;
-    snprintf(path + strlen(path), sizeof(path) - strlen(path), "/profile.ini");
 
     if (profilesReadFile(path, data, sizeof(data)) < 0)
         return 0;
@@ -366,11 +317,8 @@ static int profilesWriteIni(profile_entry_t *profile)
     char data[PROFILE_INI_MAX];
     int length = 0, i, result;
 
-    if (!profilesBuildProfileDir(profile->id, path, sizeof(path)))
+    if (!profilesPathIni(path, sizeof(path), profilesRoot, profile->id))
         return 0;
-    if ((int)strlen(path) + 12 >= (int)sizeof(path))
-        return 0;
-    snprintf(path + strlen(path), sizeof(path) - strlen(path), "/profile.ini");
 
     result = snprintf(data + length, sizeof(data) - length,
         "[Profile]\r\nid=%d\r\nname=%s\r\n\r\n[VMC]\r\n",
@@ -396,7 +344,7 @@ static int profilesWriteIni(profile_entry_t *profile)
 
 static int profilesSaveIndex(void)
 {
-    char path[PROFILE_PATH_MAX + 16];
+    char path[PROFILE_PATH_MAX];
     char data[PROFILE_INDEX_MAX];
     int length = 0, i, result;
 
@@ -405,7 +353,8 @@ static int profilesSaveIndex(void)
     if (!profilesEnsureDir(profilesBase))
         return 0;
 
-    snprintf(path, sizeof(path), "%s/profiles.dat", profilesBase);
+    if (!profilesPathIndex(path, sizeof(path), profilesRoot))
+        return 0;
 
     result = snprintf(data + length, sizeof(data) - length, "%s\r\nversion=1\r\nnext_id=%d\r\n",
         PROFILE_INDEX_MAGIC, nextProfileId);
@@ -592,8 +541,12 @@ int profilesInit(void)
         return 0;
     }
 
-    snprintf(profilesBase, sizeof(profilesBase), "%s%s", profilesRoot, PROFILE_BASE_DIR);
-    snprintf(profilesUsers, sizeof(profilesUsers), "%s/USERS", profilesBase);
+    if (!profilesPathBase(profilesBase, sizeof(profilesBase), profilesRoot) ||
+        !profilesPathUsers(profilesUsers, sizeof(profilesUsers), profilesRoot)) {
+        LOG("PROFILES Could not build profile paths on %s\n", profilesRoot);
+        profilesRoot[0] = '\0';
+        return 0;
+    }
 
     if (!profilesEnsureDir(profilesBase) || !profilesEnsureDir(profilesUsers)) {
         LOG("PROFILES Could not create %s\n", profilesBase);
@@ -602,7 +555,12 @@ int profilesInit(void)
     }
 
     profilesReady = 1;
-    snprintf(path, sizeof(path), "%s/profiles.dat", profilesBase);
+    if (!profilesPathIndex(path, sizeof(path), profilesRoot)) {
+        LOG("PROFILES Could not build the profile index path\n");
+        profilesReady = 0;
+        profilesRoot[0] = '\0';
+        return 0;
+    }
 
     {
         char data[PROFILE_INDEX_MAX];
@@ -916,27 +874,27 @@ int profilesGetVMCFile(const char *gameId, const char *configuredVMC, int slot, 
         return 0;
     }
 
-    if (snprintf(path, pathLen, "%s/USERS/%06d/VMC/%s.bin", profilesUsers, activeProfileId, vmcName) >= pathLen)
+    if (!profilesPathVmcFile(path, pathLen, profilesRoot, activeProfileId, vmcName)) {
+        LOG("PROFILES Could not build a VMC path for profile %d\n", activeProfileId);
         return 0;
+    }
 
+    LOG("PROFILES VMC slot %d for %s: %s\n", slot, (gameId != NULL && gameId[0] != '\0') ? gameId : "(unknown)", path);
     return 1;
 }
 
 int profilesGetVMCFilePath(const char *vmcName, char *path, int pathLen)
 {
-    char safeName[PROFILE_VMC_NAME_MAX];
-
     if (!profilesReady || activeProfileId <= 0 || vmcName == NULL || pathLen < 2)
-        return 0;
-
-    if (!profilesSanitizeVMCName(vmcName, safeName, sizeof(safeName)))
         return 0;
 
     if (!profilesEnsureProfileDirs(activeProfileId))
         return 0;
 
-    if (snprintf(path, pathLen, "%s/USERS/%06d/VMC/%s.bin", profilesUsers, activeProfileId, safeName) >= pathLen)
+    if (!profilesPathVmcFile(path, pathLen, profilesRoot, activeProfileId, vmcName)) {
+        LOG("PROFILES Could not build a VMC path for profile %d\n", activeProfileId);
         return 0;
+    }
 
     return 1;
 }
@@ -947,7 +905,7 @@ int profilesGetVMCFilePath(const char *vmcName, char *path, int pathLen)
 
 int profilesPrepareVMC(const char *path, vmc_superblock_t *vmc_superblock)
 {
-    int size, createResult, failure = 0;
+    int size, createResult, failure = 0, finished = 0, sawBusy = 0;
     int waited;
 
     if (path == NULL || path[0] == '\0')
@@ -965,15 +923,18 @@ int profilesPrepareVMC(const char *path, vmc_superblock_t *vmc_superblock)
         unlink(path);
 
     createResult = sysCreateVMCFile(path, PROFILE_DEFAULT_VMC_SIZE);
-    if (createResult < 0)
+    if (createResult < 0) {
         LOG("PROFILES genvmc create request failed: %d\n", createResult);
+        return -1;
+    }
 
     for (waited = 0; waited <= PROFILE_VMC_WAIT_MS; waited += PROFILE_VMC_POLL_US / 1000) {
         statusVMCparam_t status;
 
         DelayThread(PROFILE_VMC_POLL_US);
 
-        // Poll the file itself every 500 ms; the VMC superblock must be valid.
+        // Poll the file itself every 500 ms; the VMC superblock must be valid
+        // before the card is handed to the game.
         if ((waited % 500) == 0) {
             size = sysCheckVMCPath(path, 0, vmc_superblock);
             if (size > 0) {
@@ -982,99 +943,69 @@ int profilesPrepareVMC(const char *path, vmc_superblock_t *vmc_superblock)
             }
         }
 
+        // genvmc reports 0 for "available", i.e. the job is no longer running.
+        // Only trust that once the job was seen running, otherwise a status
+        // query racing the create request would end the wait early.
         if (fileXioDevctl("genvmc:", 0xC0DE0003, NULL, 0, (void *)&status, sizeof(status)) == 0) {
-            if (status.VMC_status == 0 && status.VMC_error < 0) {
-                failure = status.VMC_error;
-                LOG("PROFILES genvmc error %d: %s\n", status.VMC_error, status.VMC_msg);
+            if (status.VMC_status != 0) {
+                sawBusy = 1;
+            } else if (sawBusy) {
+                if (status.VMC_error != 0) {
+                    failure = status.VMC_error;
+                    LOG("PROFILES genvmc error %d: %s\n", status.VMC_error, status.VMC_msg);
+                }
+                finished = 1;
                 break;
             }
         }
     }
 
-    if (failure == 0) {
+    if (failure != 0) {
+        // genvmc reported a failure: never hand a half written card to a game.
+        return -1;
+    }
+
+    if (!finished) {
         LOG("PROFILES Timeout while creating VMC %s\n", path);
         fileXioDevctl("genvmc:", 0xC0DE0002, NULL, 0, NULL, 0); // abort
+        return -1;
+    }
+
+    // Give the I/O side a moment to flush the finished card, then verify it.
+    for (waited = 0; waited < 2000; waited += PROFILE_VMC_POLL_US / 1000) {
+        size = sysCheckVMCPath(path, 0, vmc_superblock);
+        if (size > 0) {
+            LOG("PROFILES VMC ready: %s (%d MB)\n", path, size);
+            return size;
+        }
+        DelayThread(PROFILE_VMC_POLL_US);
     }
 
     // Never report success for a partially written card.
-    size = sysCheckVMCPath(path, 0, vmc_superblock);
-    if (size > 0)
-        return size;
-
+    LOG("PROFILES VMC %s was not created correctly\n", path);
     return -1;
 }
+
 
 // ----------------------------------------------------------
 // ------------------- Selection screen ---------------------
 // ----------------------------------------------------------
 
-enum {
-    PSL_LBL_TITLE = 1,
-    PSL_LBL_PROFILE,
-    PSL_LBL_INFO,
-    PSL_ENUM_PROFILE,
-    PSL_BTN_USE,
-    PSL_BTN_NEW,
-    PSL_BTN_RENAME,
-    PSL_BTN_DELETE,
-    PSL_BTN_CONTINUE
-};
+// The screen itself is rendered by the launcher's own GUI
+// (guiShowProfileMenu in gui.c), so it uses the same PS5-style panel, fonts,
+// sounds, footer hints and controller handling as every other launcher dialog.
+// This file only implements the profile operations behind it.
 
-static const char *profileEnumValues[PROFILE_MAX_COUNT + 1];
-static char profileInfoText[160];
 static int profileSelectedIndex;
 
-static struct UIItem diaProfileSelect[] = {
-    {UI_LABEL, PSL_LBL_TITLE, 1, 1, -1, 0, 0, {.label = {"PS2-Launcher Profiles", -1}}},
-    {UI_SPLITTER, 0, 1, 1, -1, 0, 0, {.label = {NULL, -1}}},
-    {UI_LABEL, PSL_LBL_PROFILE, 1, 1, -1, 0, 0, {.label = {"Profile:", -1}}},
-    {UI_ENUM, PSL_ENUM_PROFILE, 1, 1, -1, 0, 0, {.intvalue = {0, 0, 0, PROFILE_MAX_COUNT - 1}}},
-    {UI_LABEL, PSL_LBL_INFO, 1, 1, -1, 0, 0, {.label = {"", -1}}},
-    {UI_SPLITTER, 0, 1, 1, -1, 0, 0, {.label = {NULL, -1}}},
-    {UI_BUTTON, PSL_BTN_USE, 1, 1, -1, 0, 0, {.label = {"Use Profile", -1}}},
-    {UI_BUTTON, PSL_BTN_NEW, 1, 1, -1, 0, 0, {.label = {"New Profile", -1}}},
-    {UI_BUTTON, PSL_BTN_RENAME, 1, 1, -1, 0, 0, {.label = {"Rename Profile", -1}}},
-    {UI_BUTTON, PSL_BTN_DELETE, 1, 1, -1, 0, 0, {.label = {"Delete Profile", -1}}},
-    {UI_BUTTON, PSL_BTN_CONTINUE, 1, 1, -1, 0, 0, {.label = {"Continue", -1}}},
-    {UI_TERMINATOR, 0, 1, 1, -1, 0, 0, {.label = {NULL, -1}}}};
-
-static void profilesRefreshScreen(void)
+static void profilesRefreshNames(const char **names, int *ids)
 {
     int i;
-    const char *activeName = profilesGetActiveName();
 
-    for (i = 0; i < profileCount; i++)
-        profileEnumValues[i] = profiles[i].name;
-
-    if (profileCount == 0) {
-        profileEnumValues[0] = "<no profiles yet>";
-        profileEnumValues[1] = NULL;
-        profileSelectedIndex = 0;
-    } else {
-        profileEnumValues[profileCount] = NULL;
-        if (profileSelectedIndex >= profileCount)
-            profileSelectedIndex = profileCount - 1;
-        if (profileSelectedIndex < 0)
-            profileSelectedIndex = 0;
+    for (i = 0; i < profileCount; i++) {
+        names[i] = profiles[i].name;
+        ids[i] = profiles[i].id;
     }
-
-    diaSetEnum(diaProfileSelect, PSL_ENUM_PROFILE, profileEnumValues);
-    diaSetInt(diaProfileSelect, PSL_ENUM_PROFILE, profileSelectedIndex);
-
-    diaSetEnabled(diaProfileSelect, PSL_ENUM_PROFILE, profileCount > 0);
-    diaSetEnabled(diaProfileSelect, PSL_BTN_USE, profileCount > 0);
-    diaSetEnabled(diaProfileSelect, PSL_BTN_RENAME, profileCount > 0);
-    diaSetEnabled(diaProfileSelect, PSL_BTN_DELETE, profileCount > 0);
-    diaSetEnabled(diaProfileSelect, PSL_ENUM_PROFILE, profileCount > 0);
-
-    if (profileCount == 0)
-        snprintf(profileInfoText, sizeof(profileInfoText), "No profiles yet. Create one to continue.");
-    else if (activeName[0] != '\0')
-        snprintf(profileInfoText, sizeof(profileInfoText), "%d profile(s). Active: %s", profileCount, activeName);
-    else
-        snprintf(profileInfoText, sizeof(profileInfoText), "%d profile(s) on %s", profileCount, profilesRoot);
-
-    diaSetLabel(diaProfileSelect, PSL_LBL_INFO, profileInfoText);
 }
 
 static int profilesPromptCreate(void)
@@ -1103,19 +1034,15 @@ static int profilesPromptCreate(void)
     return newId;
 }
 
-static void profilesPromptRename(void)
+static void profilesPromptRename(int index)
 {
     char name[PROFILE_NAME_MAX + 1];
-    int id, index;
+    int id;
 
-    if (profileCount == 0)
+    if (index < 0 || index >= profileCount)
         return;
 
-    if (profileSelectedIndex >= profileCount)
-        profileSelectedIndex = profileCount - 1;
-    index = profileSelectedIndex;
     id = profiles[index].id;
-
     snprintf(name, sizeof(name), "%s", profiles[index].name);
 
     if (!diaShowKeyb(name, sizeof(name), 0, "Rename Profile"))
@@ -1131,24 +1058,22 @@ static void profilesPromptRename(void)
         guiMsgBox("Could not rename the profile.", 0, NULL);
 }
 
-static void profilesPromptDelete(void)
+static void profilesPromptDelete(int index)
 {
-    char message[160];
+    char message[192];
     int id;
 
-    if (profileCount == 0)
+    if (index < 0 || index >= profileCount)
         return;
 
-    if (profileSelectedIndex >= profileCount)
-        profileSelectedIndex = profileCount - 1;
-    id = profiles[profileSelectedIndex].id;
+    id = profiles[index].id;
 
-    snprintf(message, sizeof(message), "Delete profile \"%s\"?\n\nAll of its VMC save data will be deleted.", profiles[profileSelectedIndex].name);
+    snprintf(message, sizeof(message), "Delete profile \"%s\"?\n\nIts memory card saves will be deleted too.", profiles[index].name);
     if (!guiMsgBox(message, 1, NULL))
         return;
 
     if (!profilesDelete(id)) {
-        guiMsgBox("Could not delete the profile.\nNo data was removed.", 0, NULL);
+        guiMsgBox("Could not delete the profile.\nSome files may remain on the USB device.", 0, NULL);
         return;
     }
 
@@ -1158,7 +1083,9 @@ static void profilesPromptDelete(void)
 
 int profilesShowSelection(void)
 {
-    int result = -1;
+    const char *names[PROFILE_MAX_COUNT];
+    int ids[PROFILE_MAX_COUNT];
+    int actionIndex = 0;
 
     if (!profilesInitialized)
         profilesInit();
@@ -1166,51 +1093,53 @@ int profilesShowSelection(void)
     if (!profilesReady)
         return 0;
 
+    if (profileSelectedIndex < 0)
+        profileSelectedIndex = 0;
+
     for (;;) {
-        profilesRefreshScreen();
+        int action, selected = profileSelectedIndex;
 
-        result = diaExecuteDialog(diaProfileSelect, result, 0, NULL);
+        profilesRefreshNames(names, ids);
 
-        // Read the value the user left in the enum (up/down changes it while the
-        // control has focus).
-        {
-            int selected = profileSelectedIndex;
-            if (diaGetInt(diaProfileSelect, PSL_ENUM_PROFILE, &selected) && selected >= 0 && selected < profileCount)
-                profileSelectedIndex = selected;
-        }
+        action = guiShowProfileMenu(names, ids, profileCount, profilesGetActiveName(),
+            &selected, &actionIndex);
 
-        if (result == PSL_BTN_USE || result == PSL_BTN_CONTINUE) {
-            if (profileCount == 0) {
-                if (profilesPromptCreate() > 0) {
-                    profilesSetActive(profiles[profileSelectedIndex].id);
-                    return 1;
+        if (selected >= 0 && selected < profileCount)
+            profileSelectedIndex = selected;
+
+        switch (action) {
+            case GUI_PROFILE_SELECT:
+                if (profileCount == 0) {
+                    // Nothing to select yet: go straight to creating one.
+                    profilesPromptCreate();
+                    break;
                 }
-                continue;
-            }
 
-            if (profileSelectedIndex < 0 || profileSelectedIndex >= profileCount)
-                profileSelectedIndex = 0;
+                if (profileSelectedIndex >= profileCount)
+                    profileSelectedIndex = 0;
 
-            if (!profilesSetActive(profiles[profileSelectedIndex].id)) {
-                guiMsgBox("Could not activate the profile.\nCheck the USB device.", 0, NULL);
-                continue;
-            }
-            return 1;
-        } else if (result == PSL_BTN_NEW) {
-            profilesPromptCreate();
-        } else if (result == PSL_BTN_RENAME) {
-            profilesPromptRename();
-        } else if (result == PSL_BTN_DELETE) {
-            profilesPromptDelete();
-        } else {
-            // Cancel: a profile is mandatory at startup, so keep the user here
-            // until one is active (or created).
-            if (activeProfileId > 0)
+                if (!profilesSetActive(profiles[profileSelectedIndex].id)) {
+                    guiMsgBox("Could not activate the profile.\nCheck the USB device.", 0, NULL);
+                    break;
+                }
+
+                LOG("PROFILES Starting with profile %s\n", profilesGetActiveName());
                 return 1;
-            if (profileCount == 0)
-                guiMsgBox("A profile is required.\nPress New Profile to create one.", 0, NULL);
-            else
-                guiMsgBox("Select a profile to continue.", 0, NULL);
+
+            case GUI_PROFILE_NEW:
+                profilesPromptCreate();
+                break;
+
+            case GUI_PROFILE_RENAME:
+                profilesPromptRename((actionIndex >= 0 && actionIndex < profileCount) ? actionIndex : profileSelectedIndex);
+                break;
+
+            case GUI_PROFILE_DELETE:
+                profilesPromptDelete((actionIndex >= 0 && actionIndex < profileCount) ? actionIndex : profileSelectedIndex);
+                break;
+
+            default:
+                break;
         }
     }
 }

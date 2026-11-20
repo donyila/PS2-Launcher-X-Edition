@@ -2,26 +2,16 @@
 #define __PROFILES_H
 
 #include "include/mcemu.h"
+#include "include/profiles_path.h"
 
 // Maximum number of profiles kept in the index.
 #define PROFILE_MAX_COUNT 16
-
-// Maximum length of a profile display name (not including the terminator).
-#define PROFILE_NAME_MAX 23
-
-// Highest allowed numeric profile ID (directory name is zero padded to 6 digits).
-#define PROFILE_ID_MAX 999999
 
 // Default VMC size, in megabytes. This matches the launcher's default slot size.
 #define PROFILE_DEFAULT_VMC_SIZE 8
 
 // Slot 1 is used by the profile system. Slot 2 is reserved for a future update.
 #define PROFILE_VMC_SLOT_COUNT 2
-
-#define PROFILE_VMC_NAME_MAX 32
-#define PROFILE_PATH_MAX     256
-
-#define PROFILE_BASE_DIR "PS2L_PROFILES"
 
 // Locate the storage device that holds the games, create PS2L_PROFILES and load
 // the profile index. Returns 1 when profiles can be used, 0 otherwise.

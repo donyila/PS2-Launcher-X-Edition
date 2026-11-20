@@ -22,6 +22,7 @@
 #include "include/cheatman.h"
 #include "include/sound.h"
 #include "include/guigame.h"
+#include "include/profiles_path.h"
 
 #include <math.h>
 #include <limits.h>
@@ -1823,6 +1824,314 @@ int guiMsgBox(const char *text, int addAccept, struct UIItem *ui)
     }
 
     return terminate - 1;
+}
+
+// ----------------------------------------------------------
+// ------------------ Profile selection ---------------------
+// ----------------------------------------------------------
+
+// Draws the launcher's own footer hint style (icon + label) ending at rightX.
+static int guiDrawProfileHint(int iconId, const char *text, int font, int rightX, int y)
+{
+    GSTEXTURE *icon = thmGetTexture(iconId);
+    int iconSize = 14;
+    int gap = 6;
+    int textWidth = fntCalcDimensions(font, text);
+    int textX = rightX - textWidth;
+    int iconX = textX - gap - iconSize;
+
+    if (icon != NULL && icon->Mem)
+        rmDrawPixmap(icon, iconX, y, ALIGN_LEFT | ALIGN_VCENTER, iconSize, iconSize, SCALING_RATIO, GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80));
+
+    fntRenderString(font, textX, y, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, text, GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80));
+
+    return iconX - 16;
+}
+
+// Shortens a string with a trailing ".." until it fits maxWidth.
+static void guiProfileEllipsize(int font, char *text, int maxWidth)
+{
+    int len = (int)strlen(text);
+
+    while (len > 0 && fntCalcDimensions(font, text) > maxWidth) {
+        len--;
+        if (len > 2) {
+            text[len - 1] = '.';
+            text[len] = '.';
+            text[len + 1] = '\0';
+        } else
+            text[len] = '\0';
+    }
+}
+
+/**
+ * Native profile selection screen.
+ *
+ * Renders the current launcher screen (background, covers, tabs, theme) and
+ * puts a PS5-style panel on top of it, exactly like the launcher's other
+ * dialogs. Up/Down moves through the profiles, then into the action row;
+ * Left/Right moves between actions. Cross selects, Triangle creates,
+ * Square renames, Circle/Start continue with the highlighted profile.
+ *
+ * Returns one of GUI_PROFILE_*; *selectedIndex is updated to the highlighted
+ * profile and *actionIndex tells which profile an action applies to.
+ */
+int guiShowProfileMenu(const char **names, const int *ids, int count, const char *activeName,
+                       int *selectedIndex, int *actionIndex)
+{
+    static const char *actionLabels[4] = {"New Profile", "Rename", "Delete", "Continue"};
+    int padSettings[16];
+    int focus, action, inActions, scroll;
+    int result = GUI_PROFILE_SELECT;
+
+    if (count < 0)
+        count = 0;
+    if (count > GUI_PROFILE_MAX)
+        count = GUI_PROFILE_MAX;
+
+    focus = (selectedIndex != NULL) ? *selectedIndex : 0;
+    if (focus < 0)
+        focus = 0;
+    if (focus >= count)
+        focus = (count > 0) ? count - 1 : 0;
+
+    // With no profiles at all the only sensible focus is "New Profile".
+    inActions = (count == 0);
+    action = inActions ? 0 : 3;
+    scroll = 0;
+
+    padStoreSettings(padSettings);
+    setButtonDelay(KEY_UP, 200);
+    setButtonDelay(KEY_DOWN, 200);
+
+    for (;;) {
+        int maxRows, rows, panelW, panelH, panelX, panelY, listTop, actionY;
+        int titleFont = gPS5Mode ? thmGetPS5TitleFont() : gTheme->fonts[0];
+        int headerFont = gPS5Mode ? thmGetPS5HeaderFont() : gTheme->fonts[0];
+        int semiFont = gPS5Mode ? thmGetPS5SemiBoldFont() : gTheme->fonts[0];
+        char info[128];
+        int i;
+
+        maxRows = (screenHeight - 250) / 30;
+        if (maxRows < 3)
+            maxRows = 3;
+        if (maxRows > 8)
+            maxRows = 8;
+
+        rows = (count < maxRows) ? count : maxRows;
+        if (rows < 1)
+            rows = 1;
+
+        panelW = screenWidth - 96;
+        if (panelW > 620)
+            panelW = 620;
+        if (panelW < 320)
+            panelW = screenWidth - 24;
+
+        panelX = (screenWidth - panelW) / 2;
+        listTop = 96;
+        actionY = listTop + rows * 30 + 26;
+        panelH = actionY + 30;
+        panelY = (screenHeight - panelH) / 2;
+        if (panelY < 12)
+            panelY = 12;
+
+        listTop += panelY;
+        actionY += panelY;
+
+        guiStartFrame();
+        readPads();
+
+        guiShow();
+
+        // Dim the launcher behind the panel, then draw the panel itself.
+        rmDrawRect(0, 0, screenWidth, screenHeight, GS_SETREG_RGBA(0, 0, 0, 0x60));
+        rmDrawRoundedRect(panelX - 1, panelY - 1, panelW + 2, panelH + 2, 8, GS_SETREG_RGBA(0x30, 0x30, 0x30, 0x80));
+        rmDrawRoundedRect(panelX, panelY, panelW, panelH, 7, GS_SETREG_RGBA(0x08, 0x08, 0x08, 0xFA));
+
+        fntRenderString(titleFont, panelX + 26, panelY + 18, ALIGN_LEFT, 0, 0, "Profiles", GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80));
+
+        if (count == 0)
+            snprintf(info, sizeof(info), "No profiles yet");
+        else if (activeName != NULL && activeName[0] != '\0')
+            snprintf(info, sizeof(info), "%d profile%s  -  Active: %s", count, count == 1 ? "" : "s", activeName);
+        else if (names != NULL && names[focus] != NULL)
+            snprintf(info, sizeof(info), "%d profile%s  -  Selected: %s", count, count == 1 ? "" : "s", names[focus]);
+        else
+            snprintf(info, sizeof(info), "%d profile%s", count, count == 1 ? "" : "s");
+        guiProfileEllipsize(headerFont, info, panelW - 52);
+        fntRenderString(headerFont, panelX + 26, panelY + 64, ALIGN_LEFT, 0, 0, info, GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x60));
+
+        if (count == 0) {
+            fntRenderString(gTheme->fonts[0], panelX + panelW / 2, listTop + 15, ALIGN_CENTER | ALIGN_VCENTER, 0, 0,
+                "Create a profile to keep separate memory card saves.", GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x60));
+        } else {
+            int first = scroll;
+            int last = first + rows;
+
+            if (last > count)
+                last = count;
+
+            for (i = first; i < last; i++) {
+                int rowY = listTop + (i - first) * 30;
+                int focused = (!inActions && i == focus);
+                char label[PROFILE_NAME_MAX + 1];
+                char idText[16];
+                u64 color = focused ? GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80) : GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x5A);
+
+                snprintf(label, sizeof(label), "%s", (names != NULL && names[i] != NULL) ? names[i] : "");
+                guiProfileEllipsize(focused ? semiFont : gTheme->fonts[0], label, panelW - 140);
+
+                if (focused)
+                    rmDrawRoundedRect(panelX + 18, rowY, panelW - 36, 28, 4, GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x1E));
+
+                fntRenderString(focused ? semiFont : gTheme->fonts[0], panelX + 32, rowY + 14, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, label, color);
+
+                if (ids != NULL)
+                    snprintf(idText, sizeof(idText), "%06d", ids[i]);
+                else
+                    idText[0] = '\0';
+                fntRenderString(gTheme->fonts[0], panelX + panelW - 32, rowY + 14, ALIGN_RIGHT | ALIGN_VCENTER, 0, 0, idText,
+                    GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x3C));
+            }
+
+            if (first > 0)
+                fntRenderString(gTheme->fonts[0], panelX + panelW / 2, listTop - 8, ALIGN_CENTER | ALIGN_VCENTER, 0, 0, "^", GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x50));
+            if (last < count)
+                fntRenderString(gTheme->fonts[0], panelX + panelW / 2, listTop + rows * 30 - 2, ALIGN_CENTER | ALIGN_VCENTER, 0, 0, "v", GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x50));
+        }
+
+        // Action row, right aligned like the launcher's confirmation dialogs.
+        {
+            int x = panelX + panelW - 26;
+
+            for (i = 3; i >= 0; i--) {
+                int enabled = (count > 0) || (i == 0);
+                int focused = inActions && action == i;
+                u64 color;
+
+                if (!enabled)
+                    color = GS_SETREG_RGBA(0x78, 0x78, 0x78, 0x30);
+                else if (focused)
+                    color = GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80);
+                else
+                    color = GS_SETREG_RGBA(0x78, 0x78, 0x78, 0x70);
+
+                x -= fntCalcDimensions(focused ? semiFont : gTheme->fonts[0], actionLabels[i]);
+                fntRenderString(focused ? semiFont : gTheme->fonts[0], x, actionY, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, actionLabels[i], color);
+                x -= 26;
+            }
+        }
+
+        // Footer hints.
+        {
+            int y = screenHeight - 20;
+            int x = screenWidth - 30;
+
+            if (count > 0)
+                x = guiDrawProfileHint(CIRCLE_ICON, "Continue", semiFont, x, y);
+            if (count > 0)
+                x = guiDrawProfileHint(SQUARE_ICON, "Rename", semiFont, x, y);
+            x = guiDrawProfileHint(TRIANGLE_ICON, "New", semiFont, x, y);
+            guiDrawProfileHint(CROSS_ICON, "Select", semiFont, x, y);
+        }
+
+        guiHandleDeferredOps();
+        guiEndFrame();
+
+        // --- Input ---
+        if (!inActions) {
+            if (getKey(KEY_UP)) {
+                sfxPlay(SFX_CURSOR);
+                if (focus > 0) {
+                    focus--;
+                    if (focus < scroll)
+                        scroll = focus;
+                }
+            } else if (getKey(KEY_DOWN)) {
+                sfxPlay(SFX_CURSOR);
+                if (focus + 1 < count) {
+                    focus++;
+                    if (focus >= scroll + rows)
+                        scroll = focus - rows + 1;
+                } else {
+                    inActions = 1;
+                    action = 3;
+                }
+            }
+        } else {
+            if (getKey(KEY_UP) && count > 0) {
+                sfxPlay(SFX_CURSOR);
+                inActions = 0;
+                focus = count - 1;
+                if (focus >= scroll + rows)
+                    scroll = focus - rows + 1;
+            } else if (getKeyOn(KEY_LEFT)) {
+                sfxPlay(SFX_CURSOR);
+                action = (action > 0) ? action - 1 : 3;
+            } else if (getKeyOn(KEY_RIGHT)) {
+                sfxPlay(SFX_CURSOR);
+                action = (action < 3) ? action + 1 : 0;
+            }
+        }
+
+        if (selectedIndex != NULL)
+            *selectedIndex = focus;
+        if (actionIndex != NULL)
+            *actionIndex = focus;
+
+        if (getKeyOn(KEY_TRIANGLE)) {
+            sfxPlay(SFX_CONFIRM);
+            result = GUI_PROFILE_NEW;
+            break;
+        }
+
+        if (count > 0 && getKeyOn(KEY_SQUARE)) {
+            sfxPlay(SFX_CONFIRM);
+            result = GUI_PROFILE_RENAME;
+            break;
+        }
+
+        // Circle continues with the highlighted profile (the launcher's usual
+        // "back" role), unless Circle itself is the confirm button.
+        if (count > 0 && gSelectButton != KEY_CIRCLE && getKeyOn(KEY_CIRCLE)) {
+            sfxPlay(SFX_CONFIRM);
+            result = GUI_PROFILE_SELECT;
+            break;
+        }
+
+        if (count > 0 && getKeyOn(KEY_START)) {
+            sfxPlay(SFX_CONFIRM);
+            result = GUI_PROFILE_SELECT;
+            break;
+        }
+
+        if (getKeyOn(gSelectButton) || getKeyOn(KEY_CROSS)) {
+            if (!inActions) {
+                sfxPlay(SFX_CONFIRM);
+                result = GUI_PROFILE_SELECT;
+                break;
+            }
+
+            if (action == 0) {
+                sfxPlay(SFX_CONFIRM);
+                result = GUI_PROFILE_NEW;
+                break;
+            }
+
+            if (count > 0) {
+                sfxPlay(SFX_CONFIRM);
+                result = (action == 1) ? GUI_PROFILE_RENAME : (action == 2) ? GUI_PROFILE_DELETE : GUI_PROFILE_SELECT;
+                break;
+            }
+
+            sfxPlay(SFX_CANCEL);
+        }
+    }
+
+    padRestoreSettings(padSettings);
+
+    return result;
 }
 
 void guiHandleDeferedIO(int *ptr, const char *message, int type, void *data)

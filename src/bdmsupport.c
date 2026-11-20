@@ -595,33 +595,44 @@ void bdmLaunchGame(item_list_t *itemList, int id, config_set_t *configSet)
         memset(&bdm_vmc_infos, 0, sizeof(bdm_vmc_infos_t));
         configGetVMC(configSet, vmc_name, sizeof(vmc_name), vmc_id);
         vmc_path[0] = '\0';
+        have_error = 0;
 
         if (useProfileVMC) {
-            // Slot 2 is reserved for a future update of the profile system.
-            if (vmc_id != 0)
-                continue;
+            // Slot 2 is reserved for a future update of the profile system. Its
+            // (zeroed, inactive) descriptor is still written into the mcemu
+            // module below so the placeholder never reaches the IOP module.
+            if (vmc_id != 0) {
+                LOG("BDMSUPPORT Profile VMC slot 2 stays unused\n");
+            } else {
+                have_error = 1;
+                if (!profilesGetVMCFile(game->startup, vmc_name, vmc_id, vmc_path, sizeof(vmc_path))) {
+                    LOG("BDMSUPPORT Could not resolve the profile VMC path for %s\n", game->startup);
+                    guiMsgBox("Could not resolve this profile's VMC path.\nCheck the USB device.", 0, NULL);
+                    return;
+                }
 
-            have_error = 1;
-            if (!profilesGetVMCFile(game->startup, vmc_name, vmc_id, vmc_path, sizeof(vmc_path))) {
-                guiMsgBox("Could not resolve this profile's VMC path.\nCheck the USB device.", 0, NULL);
-                return;
-            }
+                int vmcSizeInMb = profilesPrepareVMC(vmc_path, &vmc_superblock);
+                if (vmcSizeInMb > 0)
+                    have_error = bdmPrepareVMCInfo(&vmc_superblock, vmcSizeInMb, vmc_path, vmc_id, &bdm_vmc_infos);
 
-            int vmcSizeInMb = profilesPrepareVMC(vmc_path, &vmc_superblock);
-            if (vmcSizeInMb > 0)
-                have_error = bdmPrepareVMCInfo(&vmc_superblock, vmcSizeInMb, vmc_path, vmc_id, &bdm_vmc_infos);
+                if (have_error) {
+                    char error[256];
 
-            if (have_error) {
-                char error[256];
-                snprintf(error, sizeof(error), "Could not prepare the profile VMC.\nThe game was not launched to protect save data.\n%s", vmc_path);
-                guiMsgBox(error, 0, NULL);
-                return;
+                    if (have_error == 2)
+                        snprintf(error, sizeof(error), "The profile VMC is fragmented and cannot be used safely.\nThe game was not launched to protect save data.\n%s", vmc_path);
+                    else
+                        snprintf(error, sizeof(error), "Could not prepare the VMC for profile \"%s\".\nThe game was not launched to protect save data.\n%s", profilesGetActiveName(), vmc_path);
+
+                    LOG("BDMSUPPORT Profile VMC error %d: %s\n", have_error, vmc_path);
+                    guiMsgBox(error, 0, NULL);
+                    return;
+                }
             }
         } else if (vmc_name[0]) {
             have_error = 1;
             int vmcSizeInMb = sysCheckVMC(pDeviceData->bdmPrefix, "/", vmc_name, 0, &vmc_superblock);
             if (vmcSizeInMb > 0) {
-                sprintf(vmc_path, "%sVMC/%s.bin", pDeviceData->bdmPrefix, vmc_name);
+                snprintf(vmc_path, sizeof(vmc_path), "%sVMC/%s.bin", pDeviceData->bdmPrefix, vmc_name);
                 have_error = bdmPrepareVMCInfo(&vmc_superblock, vmcSizeInMb, vmc_path, vmc_id, &bdm_vmc_infos);
             }
         }
