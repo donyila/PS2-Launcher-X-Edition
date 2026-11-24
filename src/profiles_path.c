@@ -205,13 +205,13 @@ int profilesNameImageIsValid(const char *name)
         cursor++;
     }
 
-    // Reject "profile_01.img" and "profile_001.img" style names so there is
+    // Reject "profile_01.png" and "profile_001.png" style names so there is
     // only one spelling of every picture.
     if (digits == 0 || digits > 2)
         return 0;
     if (name[8] == '0')
         return 0;
-    if (strcmp(cursor, ".img") != 0)
+    if (strcmp(cursor, ".png") != 0)
         return 0;
 
     return (number >= 1 && number <= PROFILE_IMAGE_COUNT);
@@ -241,4 +241,29 @@ int profilesNameIsValid(const char *name)
     }
 
     return 1;
+}
+
+int profilesPhysicalMCSlotIsUsable(int sysCheckResult)
+{
+    // sysCheckMC() reports 0 for mc0:/ (Slot 1), 1 for mc1:/ (Slot 2) and a
+    // negative value when neither card can be opened. "Save to Memory Card"
+    // always writes to Slot 1, so a Slot 2 card is not a substitute.
+    return sysCheckResult == 0;
+}
+
+int profilesVMCDescriptorAllowed(int physicalMC, int profileActive, int slot, const char *configuredName)
+{
+    if (slot < 0 || slot >= PROFILE_VMC_SLOT_COUNT)
+        return 0;
+
+    // Physical memory card mode must leave both USB VMC descriptors inactive
+    // so the game talks to the real card in Slot 1.
+    if (physicalMC)
+        return 0;
+
+    // The profile system uses Slot 1 only; Slot 2 is reserved and inactive.
+    if (profileActive)
+        return slot == 0;
+
+    return configuredName != NULL && configuredName[0] != '\0';
 }

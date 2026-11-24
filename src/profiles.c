@@ -719,17 +719,23 @@ int profilesClearActive(void)
 
 int profilesSelectMemoryCard(void)
 {
-    // sysCheckMC() probes mc0: and then mc1:. A negative result means no card
-    // is mounted, so the caller must show an error instead of silently
-    // falling back to a USB VMC.
-    if (sysCheckMC() < 0) {
-        LOG("PROFILES Physical memory card mode requested, but no card is available\n");
+    // sysCheckMC() probes mc0: (Slot 1) and then mc1: (Slot 2). Physical-MC
+    // mode always saves to Slot 1, so a card in Slot 2 alone is not accepted.
+    // On failure the caller must show an error instead of silently falling
+    // back to a USB VMC.
+    int slot = sysCheckMC();
+
+    if (!profilesPhysicalMCSlotIsUsable(slot)) {
+        if (slot >= 0)
+            LOG("PROFILES Physical memory card mode requested, but Slot 1 is empty (card found in slot %d)\n", slot + 1);
+        else
+            LOG("PROFILES Physical memory card mode requested, but no card is available\n");
         return 0;
     }
 
     activeProfileId = 0;
     physicalMCMode = 1;
-    LOG("PROFILES Physical memory card mode selected\n");
+    LOG("PROFILES Physical memory card mode selected (slot 1)\n");
     return 1;
 }
 
@@ -1284,7 +1290,7 @@ int profilesShowSelection(void)
 
             case PROFILES_UI_ACTION_MEMORY_CARD:
                 if (!profilesSelectMemoryCard()) {
-                    profilesUiMessage("No Memory Card", "No usable PlayStation 2 Memory Card was found.\nInsert a card in slot 1 or 2 and try again.\n\nNo other save destination was selected.");
+                    profilesUiMessage("No Memory Card", "No usable PlayStation 2 Memory Card was found in slot 1.\nInsert a card in slot 1 and try again.\n\nNo other save destination was selected.");
                     break;
                 }
 

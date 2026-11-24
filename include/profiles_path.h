@@ -29,14 +29,19 @@
 // Maximum length of a VMC name (without the ".bin" suffix).
 #define PROFILE_VMC_NAME_MAX 32
 
-// Maximum length of a stored profile picture file name ("profile_10.img").
+// Maximum length of a stored profile picture file name ("profile_10.png").
 #define PROFILE_IMAGE_NAME_MAX 20
 
-// Number of selectable profile pictures, profile_1.img .. profile_10.img.
+// Number of selectable profile pictures, profile_1.png .. profile_10.png.
 #define PROFILE_IMAGE_COUNT 10
 
-// Directory (below the device root) that holds the selectable pictures.
+// Directory (below the device root) that holds the selectable pictures. The
+// files are ordinary PNG data even though the directory is named profile_img.
 #define PROFILE_IMAGE_DIR "profile_img"
+
+// VMC slots used by the launcher: Slot 1 is used by the profile system, Slot 2
+// is reserved and must never be activated by it.
+#define PROFILE_VMC_SLOT_COUNT 2
 
 // Directory that holds every profile asset, directly on the game device root.
 #define PROFILE_BASE_DIR "PS2L_PROFILES"
@@ -64,7 +69,7 @@ int profilesPathIni(char *out, int length, const char *deviceRoot, int id);
 int profilesPathIndex(char *out, int length, const char *deviceRoot);
 
 // <root>/profile_img/<name>
-// The name must be a valid profile picture name (profile_1.img .. profile_10.img).
+// The name must be a valid profile picture name (profile_1.png .. profile_10.png).
 int profilesPathProfileImage(char *out, int length, const char *deviceRoot, const char *imageName);
 
 // Produces a FAT-safe, path-traversal-safe VMC name. Invalid characters are
@@ -74,9 +79,21 @@ int profilesNameSanitizeVmc(const char *input, char *output, int outputLength);
 // Validates a user supplied profile display name.
 int profilesNameIsValid(const char *name);
 
-// Validates a profile picture file name: exactly "profile_<n>.img" for
+// Validates a profile picture file name: exactly "profile_<n>.png" for
 // 1 <= n <= PROFILE_IMAGE_COUNT. Used before any file system access so a
 // stored or hand edited value can never escape profile_img/.
 int profilesNameImageIsValid(const char *name);
+
+// Interprets the launcher's sysCheckMC() result (0 = mc0:/, 1 = mc1:/,
+// negative = no card). Physical memory card mode requires Slot 1, so a card
+// in Slot 2 alone is rejected.
+int profilesPhysicalMCSlotIsUsable(int sysCheckResult);
+
+// Decides whether the launcher may activate a USB VMC descriptor for a slot.
+// physicalMC is the "Save to Memory Card" mode, profileActive selects the
+// per-profile VMC (Slot 1 only) and configuredName is the game's legacy VMC
+// setting. Physical-MC mode always returns 0 for both slots so no USB VMC can
+// replace the real card.
+int profilesVMCDescriptorAllowed(int physicalMC, int profileActive, int slot, const char *configuredName);
 
 #endif

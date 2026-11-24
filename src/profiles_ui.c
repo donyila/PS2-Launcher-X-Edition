@@ -353,10 +353,9 @@ static void uiImageFree(ui_image_t *img)
     img->h = 0;
 }
 
-// Decodes a PNG buffer to 8-bit RGBA. The launcher stores its own artwork as
-// PNG (texLoadMem), so the .img profile pictures are PNG files with an .img
-// extension. The signature is checked before parsing; anything else is
-// rejected cleanly instead of being guessed at.
+// Decodes a PNG buffer to 8-bit RGBA. Profile pictures are ordinary PNG files
+// loaded from <root>/profile_img/profile_N.png. The signature is checked
+// before parsing; anything else is rejected cleanly instead of being guessed at.
 static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
 {
     png_structp pngPtr = NULL;
@@ -1049,7 +1048,7 @@ static int uiImageIndex(const char *imageName)
         return 0;
 
     for (i = 1; i <= PROFILE_IMAGE_COUNT; i++) {
-        snprintf(name, sizeof(name), "profile_%d.img", i);
+        snprintf(name, sizeof(name), "profile_%d.png", i);
         if (strcasecmp(name, imageName) == 0)
             return i - 1;
     }
@@ -1072,7 +1071,7 @@ static void uiLoadThumbnails(void)
             continue;
 
         uiThumbState[i] = -1;
-        snprintf(name, sizeof(name), "profile_%d.img", i + 1);
+        snprintf(name, sizeof(name), "profile_%d.png", i + 1);
 
         if (!profilesImagePath(name, path, sizeof(path)))
             continue;
@@ -1177,7 +1176,7 @@ int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
         if (uiConfirmPressed()) {
             if (uiThumbState[focus] == 1) {
                 char name[PROFILE_IMAGE_NAME_MAX];
-                snprintf(name, sizeof(name), "profile_%d.img", focus + 1);
+                snprintf(name, sizeof(name), "profile_%d.png", focus + 1);
                 snprintf(out, outLen, "%s", name);
                 sfxPlay(SFX_CONFIRM);
                 result = 1;

@@ -131,34 +131,76 @@ static void testProfileImages(void)
 {
     char path[PROFILE_PATH_MAX];
     char name[PROFILE_IMAGE_NAME_MAX];
+    char expected[PROFILE_PATH_MAX];
     int i;
 
-    CHECK(profilesNameImageIsValid("profile_1.img") == 1);
-    CHECK(profilesNameImageIsValid("profile_9.img") == 1);
-    CHECK(profilesNameImageIsValid("profile_10.img") == 1);
-    CHECK(profilesNameImageIsValid("profile_11.img") == 0);
-    CHECK(profilesNameImageIsValid("profile_0.img") == 0);
-    CHECK(profilesNameImageIsValid("profile_01.img") == 0);
-    CHECK(profilesNameImageIsValid("profile_1.png") == 0);
-    CHECK(profilesNameImageIsValid("profile_.img") == 0);
-    CHECK(profilesNameImageIsValid("../profile_1.img") == 0);
-    CHECK(profilesNameImageIsValid("profile_1.img/../../x") == 0);
+    // The final format is .png. The old .img names must not be accepted.
+    CHECK(profilesNameImageIsValid("profile_1.img") == 0);
+    CHECK(profilesNameImageIsValid("profile_10.img") == 0);
+
+    CHECK(profilesNameImageIsValid("profile_1.png") == 1);
+    CHECK(profilesNameImageIsValid("profile_9.png") == 1);
+    CHECK(profilesNameImageIsValid("profile_10.png") == 1);
+    CHECK(profilesNameImageIsValid("profile_11.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_0.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_01.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_001.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_100.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_1.PNG") == 0);
+    CHECK(profilesNameImageIsValid("profile_.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_1.png.bak") == 0);
+    CHECK(profilesNameImageIsValid("sub/profile_1.png") == 0);
+    CHECK(profilesNameImageIsValid("../profile_1.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_1.png/../../x") == 0);
     CHECK(profilesNameImageIsValid("") == 0);
     CHECK(profilesNameImageIsValid(NULL) == 0);
 
-    // Every picture name the UI offers must be accepted, and only those.
+    // Every picture name the UI offers must be accepted, resolve to
+    // <root>/profile_img/profile_N.png and stay inside profile_img/.
     for (i = 1; i <= PROFILE_IMAGE_COUNT; i++) {
-        snprintf(name, sizeof(name), "profile_%d.img", i);
+        snprintf(name, sizeof(name), "profile_%d.png", i);
         CHECK(profilesNameImageIsValid(name) == 1);
+
+        snprintf(expected, sizeof(expected), "mass0:/profile_img/profile_%d.png", i);
+        CHECK_PATH(expected, profilesPathProfileImage(path, sizeof(path), "mass0:/", name));
+        CHECK(strstr(path, "profile_png") == NULL);
     }
 
-    CHECK_PATH("mass0:/profile_img/profile_1.img",
-        profilesPathProfileImage(path, sizeof(path), "mass0:/", "profile_1.img"));
-    CHECK_PATH("mass1:/profile_img/profile_10.img",
-        profilesPathProfileImage(path, sizeof(path), "mass1:", "profile_10.img"));
+    CHECK_PATH("mass0:/profile_img/profile_1.png",
+        profilesPathProfileImage(path, sizeof(path), "mass0:/", "profile_1.png"));
+    CHECK_PATH("mass1:/profile_img/profile_10.png",
+        profilesPathProfileImage(path, sizeof(path), "mass1:", "profile_10.png"));
 
     CHECK(profilesPathProfileImage(path, sizeof(path), "mass0:/", "../../etc/passwd") == 0);
     CHECK(profilesPathProfileImage(path, sizeof(path), "mass0:/", NULL) == 0);
+}
+
+static void testPhysicalMemoryCard(void)
+{
+    // sysCheckMC(): 0 = mc0:/ (Slot 1), 1 = mc1:/ (Slot 2), negative = none.
+    CHECK(profilesPhysicalMCSlotIsUsable(0) == 1);
+    CHECK(profilesPhysicalMCSlotIsUsable(1) == 0); // Slot 2 alone is not enough
+    CHECK(profilesPhysicalMCSlotIsUsable(-11) == 0);
+    CHECK(profilesPhysicalMCSlotIsUsable(-1) == 0);
+
+    // Physical-MC mode must leave both USB VMC descriptors inactive, even if a
+    // profile or a legacy configured VMC would otherwise apply.
+    CHECK(profilesVMCDescriptorAllowed(1, 0, 0, "SLUS_206.58") == 0);
+    CHECK(profilesVMCDescriptorAllowed(1, 0, 1, "SLUS_206.58") == 0);
+    CHECK(profilesVMCDescriptorAllowed(1, 1, 0, "SLUS_206.58") == 0);
+    CHECK(profilesVMCDescriptorAllowed(1, 1, 1, "SLUS_206.58") == 0);
+    CHECK(profilesVMCDescriptorAllowed(1, 0, 0, NULL) == 0);
+
+    // A profile uses Slot 1 only; Slot 2 stays reserved and inactive.
+    CHECK(profilesVMCDescriptorAllowed(0, 1, 0, "SLUS_206.58") == 1);
+    CHECK(profilesVMCDescriptorAllowed(0, 1, 1, "SLUS_206.58") == 0);
+
+    // The legacy configured VMC still works without a profile or physical card.
+    CHECK(profilesVMCDescriptorAllowed(0, 0, 0, "SLUS_206.58") == 1);
+    CHECK(profilesVMCDescriptorAllowed(0, 0, 1, "SLUS_206.58") == 1);
+    CHECK(profilesVMCDescriptorAllowed(0, 0, 0, "") == 0);
+    CHECK(profilesVMCDescriptorAllowed(0, 0, 0, NULL) == 0);
+    CHECK(profilesVMCDescriptorAllowed(0, 0, 2, "SLUS_206.58") == 0);
 }
 
 static void testProfileNames(void)
@@ -186,6 +228,7 @@ int main(void)
     testShortBuffers();
     testVmcNames();
     testProfileImages();
+    testPhysicalMemoryCard();
     testProfileNames();
 
     if (failures != 0) {
