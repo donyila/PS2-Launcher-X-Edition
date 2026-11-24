@@ -18,6 +18,7 @@
 #include "include/system.h"
 #include "include/util.h"
 #include "include/profiles.h"
+#include "include/profiles_ui.h"
 #include <delaythread.h>
 
 #define NEWLIB_PORT_AWARE
@@ -34,6 +35,7 @@ typedef struct
 {
     int id;
     char name[PROFILE_NAME_MAX + 1];
+    char image[PROFILE_IMAGE_NAME_MAX + 1];
     int vmcMapCount;
     char vmcMapKey[PROFILE_VMC_MAPS][PROFILE_VMC_NAME_MAX];
     char vmcMapValue[PROFILE_VMC_MAPS][PROFILE_VMC_NAME_MAX];
@@ -51,6 +53,7 @@ static profile_entry_t profiles[PROFILE_MAX_COUNT];
 static int profileCount;
 static int nextProfileId;
 static int activeProfileId;
+static int physicalMCMode;
 static int profilesReady;
 static int profilesInitialized;
 
@@ -301,6 +304,15 @@ static int profilesReadIni(profile_entry_t *profile, int useNameFallback)
                 if (strcasecmp(trimmed, "name") == 0 && useNameFallback && profilesIsValidName(value)) {
                     strncpy(profile->name, value, PROFILE_NAME_MAX);
                     profile->name[PROFILE_NAME_MAX] = '\0';
+                } else if (strcasecmp(trimmed, "image") == 0) {
+                    // A stored picture that no longer matches the expected
+                    // naming falls back to the default user.png instead of
+                    // failing the whole profile.
+                    if (profilesNameImageIsValid(value)) {
+                        strncpy(profile->image, value, PROFILE_IMAGE_NAME_MAX);
+                        profile->image[PROFILE_IMAGE_NAME_MAX] = '\0';
+                    } else
+                        profile->image[0] = '\0';
                 }
             }
         }
@@ -321,8 +333,8 @@ static int profilesWriteIni(profile_entry_t *profile)
         return 0;
 
     result = snprintf(data + length, sizeof(data) - length,
-        "[Profile]\r\nid=%d\r\nname=%s\r\n\r\n[VMC]\r\n",
-        profile->id, profile->name);
+        "[Profile]\r\nid=%d\r\nname=%s\r\nimage=%s\r\n\r\n[VMC]\r\n",
+        profile->id, profile->name, profile->image);
     if (result <= 0 || result >= (int)sizeof(data) - length)
         return 0;
     length += result;
@@ -617,6 +629,38 @@ const char *profilesGetName(int index)
     return profiles[index].name;
 }
 
+const char *profilesGetImage(int index)
+{
+    if (index < 0 || index >= profileCount)
+        return "";
+    return profiles[index].image;
+}
+
+int profilesImagePath(const char *imageName, char *path, int pathLen)
+{
+    if (!profilesReady || imageName == NULL || path == NULL || pathLen < 2)
+        return 0;
+
+    return profilesPathProfileImage(path, pathLen, profilesRoot, imageName);
+}
+
+int profilesNameInUse(const char *name, int ignoreId)
+{
+    int i;
+
+    if (name == NULL)
+        return 0;
+
+    for (i = 0; i < profileCount; i++) {
+        if (ignoreId > 0 && profiles[i].id == ignoreId)
+            continue;
+        if (strcasecmp(profiles[i].name, name) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
 int profilesGetActiveId(void)
 {
     return activeProfileId;
@@ -660,6 +704,7 @@ int profilesSetActive(int id)
         return 0;
     }
 
+    physicalMCMode = 0;
     activeProfileId = profiles[index].id;
     LOG("PROFILES Active profile: %s (%06d)\n", profiles[index].name, activeProfileId);
     return 1;
@@ -668,7 +713,29 @@ int profilesSetActive(int id)
 int profilesClearActive(void)
 {
     activeProfileId = 0;
+    physicalMCMode = 0;
     return 1;
+}
+
+int profilesSelectMemoryCard(void)
+{
+    // sysCheckMC() probes mc0: and then mc1:. A negative result means no card
+    // is mounted, so the caller must show an error instead of silently
+    // falling back to a USB VMC.
+    if (sysCheckMC() < 0) {
+        LOG("PROFILES Physical memory card mode requested, but no card is available\n");
+        return 0;
+    }
+
+    activeProfileId = 0;
+    physicalMCMode = 1;
+    LOG("PROFILES Physical memory card mode selected\n");
+    return 1;
+}
+
+int profilesIsPhysicalMC(void)
+{
+    return physicalMCMode;
 }
 
 static void profilesNormalizeName(const char *source, char *dest, int destLen)
@@ -695,9 +762,10 @@ static void profilesNormalizeName(const char *source, char *dest, int destLen)
     }
 }
 
-static int profilesCreate(const char *name, int *outId)
+static int profilesCreate(const char *name, const char *imageName, int *outId)
 {
     char cleanName[PROFILE_NAME_MAX + 1];
+    char cleanImage[PROFILE_IMAGE_NAME_MAX + 1];
     char profileDir[PROFILE_PATH_MAX];
     profile_entry_t *profile;
     int id, attempts = 0;
@@ -708,6 +776,16 @@ static int profilesCreate(const char *name, int *outId)
     profilesNormalizeName(name, cleanName, sizeof(cleanName));
     if (!profilesIsValidName(cleanName))
         return 0;
+    if (profilesNameInUse(cleanName, 0))
+        return 0;
+
+    cleanImage[0] = '\0';
+    if (imageName != NULL && imageName[0] != '\0') {
+        if (!profilesNameImageIsValid(imageName))
+            return 0;
+        strncpy(cleanImage, imageName, PROFILE_IMAGE_NAME_MAX);
+        cleanImage[PROFILE_IMAGE_NAME_MAX] = '\0';
+    }
 
     id = nextProfileId;
     if (id < 1)
@@ -735,6 +813,8 @@ static int profilesCreate(const char *name, int *outId)
     profile->id = id;
     strncpy(profile->name, cleanName, PROFILE_NAME_MAX);
     profile->name[PROFILE_NAME_MAX] = '\0';
+    strncpy(profile->image, cleanImage, PROFILE_IMAGE_NAME_MAX);
+    profile->image[PROFILE_IMAGE_NAME_MAX] = '\0';
 
     if (!profilesWriteIni(profile)) {
         LOG("PROFILES Could not write profile.ini for %d\n", id);
@@ -775,6 +855,8 @@ static int profilesRename(int id, const char *name)
 
     profilesNormalizeName(name, cleanName, sizeof(cleanName));
     if (!profilesIsValidName(cleanName))
+        return 0;
+    if (profilesNameInUse(cleanName, id))
         return 0;
 
     strncpy(oldName, profiles[index].name, sizeof(oldName));
@@ -825,6 +907,56 @@ static int profilesDelete(int id)
     }
 
     LOG("PROFILES Deleted profile %d\n", id);
+    return 1;
+}
+
+// ----------------------------------------------------------
+// ------------------- Public operations --------------------
+// ----------------------------------------------------------
+
+int profilesCreateProfile(const char *name, const char *imageName, int *outId)
+{
+    return profilesCreate(name, imageName, outId);
+}
+
+int profilesRenameProfile(int id, const char *name)
+{
+    return profilesRename(id, name);
+}
+
+int profilesDeleteProfile(int id)
+{
+    return profilesDelete(id);
+}
+
+int profilesSetProfileImage(int id, const char *imageName)
+{
+    char oldImage[PROFILE_IMAGE_NAME_MAX + 1];
+    int index = profilesFindIndex(id);
+
+    if (index < 0)
+        return 0;
+
+    if (imageName != NULL && imageName[0] != '\0' && !profilesNameImageIsValid(imageName))
+        return 0;
+
+    strncpy(oldImage, profiles[index].image, sizeof(oldImage));
+    oldImage[PROFILE_IMAGE_NAME_MAX] = '\0';
+
+    if (imageName != NULL && imageName[0] != '\0') {
+        strncpy(profiles[index].image, imageName, PROFILE_IMAGE_NAME_MAX);
+        profiles[index].image[PROFILE_IMAGE_NAME_MAX] = '\0';
+    } else {
+        profiles[index].image[0] = '\0';
+    }
+
+    if (!profilesWriteIni(&profiles[index])) {
+        strncpy(profiles[index].image, oldImage, PROFILE_IMAGE_NAME_MAX);
+        profiles[index].image[PROFILE_IMAGE_NAME_MAX] = '\0';
+        LOG("PROFILES Could not store the picture for profile %d\n", id);
+        return 0;
+    }
+
     return 1;
 }
 
@@ -991,50 +1123,46 @@ int profilesPrepareVMC(const char *path, vmc_superblock_t *vmc_superblock)
 // ------------------- Selection screen ---------------------
 // ----------------------------------------------------------
 
-// The screen itself is rendered by the launcher's own GUI
-// (guiShowProfileMenu in gui.c), so it uses the same PS5-style panel, fonts,
-// sounds, footer hints and controller handling as every other launcher dialog.
-// This file only implements the profile operations behind it.
+// The native carousel, Add User screen and picture chooser live in
+// profiles_ui.c. This file owns the state transitions so every storage rule
+// stays in one place.
 
 static int profileSelectedIndex;
+static int profileSelectionEntered;
 
-static void profilesRefreshNames(const char **names, int *ids)
-{
-    int i;
-
-    for (i = 0; i < profileCount; i++) {
-        names[i] = profiles[i].name;
-        ids[i] = profiles[i].id;
-    }
-}
-
-static int profilesPromptCreate(void)
+static void profilesHandleCreate(void)
 {
     char name[PROFILE_NAME_MAX + 1];
+    char image[PROFILE_IMAGE_NAME_MAX + 1];
     int newId = 0;
 
-    snprintf(name, sizeof(name), "Player %d", profileCount + 1);
+    snprintf(name, sizeof(name), "User %d", profileCount + 1);
+    image[0] = '\0';
 
-    if (!diaShowKeyb(name, sizeof(name), 0, "New Profile Name"))
-        return 0;
+    for (;;) {
+        if (!profilesUiAddUser(name, sizeof(name), image, sizeof(image)))
+            return;
 
-    profilesNormalizeName(name, name, sizeof(name));
-    if (!profilesIsValidName(name)) {
-        guiMsgBox("Invalid profile name.\nUse 1-23 characters without : / \\ |", 0, NULL);
-        return 0;
+        profilesNormalizeName(name, name, sizeof(name));
+        // profilesUiAddUser checks both conditions and shows an inline error;
+        // this guard makes sure an invalid value can never reach the index.
+        if (!profilesIsValidName(name) || profilesNameInUse(name, 0)) {
+            profilesUiMessage("Invalid Name", "Enter 1-23 characters without : / \\ | and use a name that is not taken yet.");
+            continue;
+        }
+
+        if (!profilesCreate(name, image, &newId)) {
+            profilesUiMessage("Could Not Create Profile", "The profile could not be saved.\nCheck the USB device and its free space.");
+            continue;
+        }
+
+        // Keep the focus on the card that was just created.
+        profileSelectedIndex = profilesFindIndex(newId) + 1;
+        return;
     }
-
-    if (!profilesCreate(name, &newId)) {
-        guiMsgBox("Could not create the profile.\nCheck the USB device and free space.", 0, NULL);
-        return 0;
-    }
-
-    profileSelectedIndex = profilesFindIndex(newId);
-    guiMsgBox("Profile created.", 0, NULL);
-    return newId;
 }
 
-static void profilesPromptRename(int index)
+static void profilesHandleRename(int index)
 {
     char name[PROFILE_NAME_MAX + 1];
     int id;
@@ -1049,94 +1177,138 @@ static void profilesPromptRename(int index)
         return;
 
     profilesNormalizeName(name, name, sizeof(name));
+
     if (!profilesIsValidName(name)) {
-        guiMsgBox("Invalid profile name.\nUse 1-23 characters without : / \\ |", 0, NULL);
+        profilesUiMessage("Invalid Name", "Enter 1-23 characters without : / \\ |.");
         return;
     }
 
+    if (profilesNameInUse(name, id)) {
+        profilesUiMessage("Name In Use", "Another profile already has that name.");
+        return;
+    }
+
+    // profilesRename only writes the name. The numeric ID and the
+    // USERS/<id>/VMC directory are untouched.
     if (!profilesRename(id, name))
-        guiMsgBox("Could not rename the profile.", 0, NULL);
+        profilesUiMessage("Could Not Rename Profile", "The new name could not be saved.\nCheck the USB device.");
 }
 
-static void profilesPromptDelete(int index)
+static void profilesHandlePicture(int index)
 {
-    char message[192];
+    char current[PROFILE_IMAGE_NAME_MAX + 1];
+    char chosen[PROFILE_IMAGE_NAME_MAX + 1];
     int id;
 
     if (index < 0 || index >= profileCount)
         return;
 
     id = profiles[index].id;
+    snprintf(current, sizeof(current), "%s", profiles[index].image);
+    snprintf(chosen, sizeof(chosen), "%s", current);
 
+    if (!profilesUiPictureChooser(current, chosen, sizeof(chosen)))
+        return;
+
+    if (!profilesSetProfileImage(id, chosen))
+        profilesUiMessage("Could Not Save Picture", "The picture could not be stored in profile.ini.\nCheck the USB device.");
+}
+
+static void profilesHandleDelete(int index)
+{
+    char message[224];
+    int id;
+
+    if (index < 0 || index >= profileCount)
+        return;
+
+    id = profiles[index].id;
     snprintf(message, sizeof(message), "Delete profile \"%s\"?\n\nIts memory card saves will be deleted too.", profiles[index].name);
-    if (!guiMsgBox(message, 1, NULL))
+
+    if (!profilesUiConfirm("Delete Profile", message, "Delete", "Cancel"))
         return;
 
     if (!profilesDelete(id)) {
-        guiMsgBox("Could not delete the profile.\nSome files may remain on the USB device.", 0, NULL);
+        profilesUiMessage("Could Not Delete Profile", "Some files may remain on the USB device.\nCheck the device and try again.");
         return;
     }
 
-    if (profileSelectedIndex >= profileCount && profileSelectedIndex > 0)
-        profileSelectedIndex--;
+    if (profileSelectedIndex > profileCount)
+        profileSelectedIndex = profileCount + 1;
+    if (profileSelectedIndex < 0)
+        profileSelectedIndex = 0;
 }
 
 int profilesShowSelection(void)
 {
-    const char *names[PROFILE_MAX_COUNT];
-    int ids[PROFILE_MAX_COUNT];
-    int actionIndex = 0;
-
     if (!profilesInitialized)
         profilesInit();
 
     if (!profilesReady)
         return 0;
 
+    profilesUiBegin();
+
+    if (!profileSelectionEntered) {
+        // With existing profiles the first profile is focused, like the
+        // reference artwork. With no profiles, Add User is focused.
+        profileSelectedIndex = (profileCount > 0) ? 1 : 0;
+        profileSelectionEntered = 1;
+    }
+
     if (profileSelectedIndex < 0)
         profileSelectedIndex = 0;
+    if (profileSelectedIndex > profileCount + 1)
+        profileSelectedIndex = profileCount + 1;
 
     for (;;) {
-        int action, selected = profileSelectedIndex;
+        profiles_ui_result_t result = profilesUiSelect(&profileSelectedIndex);
 
-        profilesRefreshNames(names, ids);
-
-        action = guiShowProfileMenu(names, ids, profileCount, profilesGetActiveName(),
-            &selected, &actionIndex);
-
-        if (selected >= 0 && selected < profileCount)
-            profileSelectedIndex = selected;
-
-        switch (action) {
-            case GUI_PROFILE_SELECT:
-                if (profileCount == 0) {
-                    // Nothing to select yet: go straight to creating one.
-                    profilesPromptCreate();
+        switch (result.action) {
+            case PROFILES_UI_ACTION_PROFILE:
+                if (result.profileIndex < 0 || result.profileIndex >= profileCount)
                     break;
-                }
 
-                if (profileSelectedIndex >= profileCount)
-                    profileSelectedIndex = 0;
-
-                if (!profilesSetActive(profiles[profileSelectedIndex].id)) {
-                    guiMsgBox("Could not activate the profile.\nCheck the USB device.", 0, NULL);
+                if (!profilesSetActive(profiles[result.profileIndex].id)) {
+                    profilesUiMessage("Could Not Start Profile", "The profile's folders could not be prepared.\nCheck the USB device.");
                     break;
                 }
 
                 LOG("PROFILES Starting with profile %s\n", profilesGetActiveName());
+                profilesUiEnd();
                 return 1;
 
-            case GUI_PROFILE_NEW:
-                profilesPromptCreate();
+            case PROFILES_UI_ACTION_ADD:
+                profilesHandleCreate();
                 break;
 
-            case GUI_PROFILE_RENAME:
-                profilesPromptRename((actionIndex >= 0 && actionIndex < profileCount) ? actionIndex : profileSelectedIndex);
-                break;
+            case PROFILES_UI_ACTION_MEMORY_CARD:
+                if (!profilesSelectMemoryCard()) {
+                    profilesUiMessage("No Memory Card", "No usable PlayStation 2 Memory Card was found.\nInsert a card in slot 1 or 2 and try again.\n\nNo other save destination was selected.");
+                    break;
+                }
 
-            case GUI_PROFILE_DELETE:
-                profilesPromptDelete((actionIndex >= 0 && actionIndex < profileCount) ? actionIndex : profileSelectedIndex);
+                LOG("PROFILES Starting with the physical memory card\n");
+                profilesUiEnd();
+                return 1;
+
+            case PROFILES_UI_ACTION_OPTIONS: {
+                int choice = 3;
+
+                if (result.profileIndex < 0 || result.profileIndex >= profileCount)
+                    break;
+
+                if (!profilesUiOptions(profiles[result.profileIndex].name, &choice))
+                    break;
+
+                if (choice == 0)
+                    profilesHandleRename(result.profileIndex);
+                else if (choice == 1)
+                    profilesHandlePicture(result.profileIndex);
+                else if (choice == 2)
+                    profilesHandleDelete(result.profileIndex);
                 break;
+            }
 
             default:
                 break;

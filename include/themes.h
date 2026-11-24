@@ -169,9 +169,17 @@ void ps5ClearCoverCache(void);
 void ps5RetryMissingCoverCache(void);
 void playPS5LaunchTransition(const char *gameTitle);
 void drawPS5LaunchLoadingFrame(unsigned int frame, int alpha);
+// Loads the embedded Roboto fonts and the shared rounded-rectangle masks. The
+// normal launcher calls this lazily while rendering; the profile screens run
+// before the first launcher frame and call it explicitly.
+void thmEnsurePS5UI(void);
 int thmGetPS5TitleFont(void);
+int thmGetPS5ProfileTitleFont(void);
+int thmGetPS5ProfileSubFont(void);
+int thmGetPS5TinyFont(void);
 int thmGetPS5HeaderFont(void);
 int thmGetPS5SemiBoldFont(void);
+int thmGetPS5SmallFont(void);
 void drawPS5FocusPointer(int x, int y);
 void drawPS5GameHeaderArtwork(const char *title, int x, int y, int w, int h);
 void rmDrawRoundedRect(int x, int y, int w, int h, int r, u64 color);

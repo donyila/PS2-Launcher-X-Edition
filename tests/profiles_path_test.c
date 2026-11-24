@@ -127,6 +127,40 @@ static void testVmcNames(void)
         profilesPathVmcFile(path, sizeof(path), "mass0:/", 7, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"));
 }
 
+static void testProfileImages(void)
+{
+    char path[PROFILE_PATH_MAX];
+    char name[PROFILE_IMAGE_NAME_MAX];
+    int i;
+
+    CHECK(profilesNameImageIsValid("profile_1.img") == 1);
+    CHECK(profilesNameImageIsValid("profile_9.img") == 1);
+    CHECK(profilesNameImageIsValid("profile_10.img") == 1);
+    CHECK(profilesNameImageIsValid("profile_11.img") == 0);
+    CHECK(profilesNameImageIsValid("profile_0.img") == 0);
+    CHECK(profilesNameImageIsValid("profile_01.img") == 0);
+    CHECK(profilesNameImageIsValid("profile_1.png") == 0);
+    CHECK(profilesNameImageIsValid("profile_.img") == 0);
+    CHECK(profilesNameImageIsValid("../profile_1.img") == 0);
+    CHECK(profilesNameImageIsValid("profile_1.img/../../x") == 0);
+    CHECK(profilesNameImageIsValid("") == 0);
+    CHECK(profilesNameImageIsValid(NULL) == 0);
+
+    // Every picture name the UI offers must be accepted, and only those.
+    for (i = 1; i <= PROFILE_IMAGE_COUNT; i++) {
+        snprintf(name, sizeof(name), "profile_%d.img", i);
+        CHECK(profilesNameImageIsValid(name) == 1);
+    }
+
+    CHECK_PATH("mass0:/profile_img/profile_1.img",
+        profilesPathProfileImage(path, sizeof(path), "mass0:/", "profile_1.img"));
+    CHECK_PATH("mass1:/profile_img/profile_10.img",
+        profilesPathProfileImage(path, sizeof(path), "mass1:", "profile_10.img"));
+
+    CHECK(profilesPathProfileImage(path, sizeof(path), "mass0:/", "../../etc/passwd") == 0);
+    CHECK(profilesPathProfileImage(path, sizeof(path), "mass0:/", NULL) == 0);
+}
+
 static void testProfileNames(void)
 {
     CHECK(profilesNameIsValid("Alice") == 1);
@@ -151,6 +185,7 @@ int main(void)
     testIds();
     testShortBuffers();
     testVmcNames();
+    testProfileImages();
     testProfileNames();
 
     if (failures != 0) {

@@ -580,6 +580,11 @@ void bdmLaunchGame(item_list_t *itemList, int id, config_set_t *configSet)
     bdm_vmc_infos_t bdm_vmc_infos;
     vmc_superblock_t vmc_superblock;
 
+    // "Save to Memory Card" keeps the original physical memory card slot
+    // behaviour: configured VMCs are ignored for this launch and no profile
+    // VMC is created or activated.
+    int usePhysicalMC = profilesIsPhysicalMC();
+
     // When a profile is active, the game's VMC lives in the profile's own VMC
     // directory. Auto-launch keeps the legacy behaviour (no profile selected).
     int useProfileVMC = 0;
@@ -628,7 +633,7 @@ void bdmLaunchGame(item_list_t *itemList, int id, config_set_t *configSet)
                     return;
                 }
             }
-        } else if (vmc_name[0]) {
+        } else if (!usePhysicalMC && vmc_name[0]) {
             have_error = 1;
             int vmcSizeInMb = sysCheckVMC(pDeviceData->bdmPrefix, "/", vmc_name, 0, &vmc_superblock);
             if (vmcSizeInMb > 0) {

@@ -73,7 +73,7 @@ endif
 
 FRONTEND_OBJS = pad.o xparam.o fntsys.o renderman.o menusys.o OSDHistory.o system.o lang.o lang_internal.o config.o hdd.o dialogs.o \
 		dia.o ioman.o texcache.o themes.o supportbase.o bdmsupport.o ethsupport.o hddsupport.o zso.o lz4.o \
-		appsupport.o gui.o guigame.o textures.o opl.o atlas.o nbns.o httpclient.o gsm.o cheatman.o sound.o ps2cnf.o profiles.o profiles_path.o
+		appsupport.o gui.o guigame.o textures.o opl.o atlas.o nbns.o httpclient.o gsm.o cheatman.o sound.o ps2cnf.o profiles.o profiles_path.o profiles_ui.o
 
 IOP_OBJS =	iomanx.o filexio.o ps2fs.o usbd.o bdmevent.o \
 		bdm.o bdmfs_fatfs.o usbmass_bd.o iLinkman.o IEEE1394_bd.o mx4sio_bd.o \
@@ -91,7 +91,7 @@ EECORE_OBJS = ee_core.o ioprp.o util.o \
 		hdd_cdvdman.o hdd_hdpro_cdvdman.o cdvdfsv.o \
 		ingame_smstcpip.o smap_ingame.o smbman.o smbinit.o
 
-PNG_ASSETS = loader Instagram_icon logo square cross circle triangle focus
+PNG_ASSETS = loader Instagram_icon logo square cross circle triangle focus user memory_card ps2_logo
 	# unused icons - up down l1 l2 l3 r1 r2 r3
 
 COVER_ASSETS = $(basename $(notdir $(wildcard covers/*.png)))

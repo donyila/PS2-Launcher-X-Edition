@@ -133,6 +133,23 @@ int profilesPathIndex(char *out, int length, const char *deviceRoot)
     return profilesPathJoin(out, length, deviceRoot, PROFILE_BASE_DIR "/profiles.dat");
 }
 
+int profilesPathProfileImage(char *out, int length, const char *deviceRoot, const char *imageName)
+{
+    char suffix[PROFILE_PATH_MAX];
+    int written;
+
+    if (out == NULL || length < 2 || imageName == NULL)
+        return 0;
+    if (!profilesNameImageIsValid(imageName))
+        return 0;
+
+    written = snprintf(suffix, sizeof(suffix), PROFILE_IMAGE_DIR "/%s", imageName);
+    if (written <= 0 || written >= (int)sizeof(suffix))
+        return 0;
+
+    return profilesPathJoin(out, length, deviceRoot, suffix);
+}
+
 int profilesNameSanitizeVmc(const char *input, char *output, int outputLength)
 {
     int i, out = 0;
@@ -168,6 +185,36 @@ int profilesNameSanitizeVmc(const char *input, char *output, int outputLength)
         return 0;
 
     return 1;
+}
+
+int profilesNameImageIsValid(const char *name)
+{
+    const char *cursor;
+    int number = 0, digits = 0;
+
+    if (name == NULL)
+        return 0;
+
+    if (strncmp(name, "profile_", 8) != 0)
+        return 0;
+
+    cursor = name + 8;
+    while (*cursor >= '0' && *cursor <= '9' && digits < 3) {
+        number = number * 10 + (*cursor - '0');
+        digits++;
+        cursor++;
+    }
+
+    // Reject "profile_01.img" and "profile_001.img" style names so there is
+    // only one spelling of every picture.
+    if (digits == 0 || digits > 2)
+        return 0;
+    if (name[8] == '0')
+        return 0;
+    if (strcmp(cursor, ".img") != 0)
+        return 0;
+
+    return (number >= 1 && number <= PROFILE_IMAGE_COUNT);
 }
 
 int profilesNameIsValid(const char *name)

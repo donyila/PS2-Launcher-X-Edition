@@ -113,19 +113,6 @@ void guiDestroyOp(struct gui_update_t *op);
 int guiShowKeyboard(char *value, int maxLength);
 int guiMsgBox(const char *text, int addAccept, struct UIItem *ui);
 
-// Native profile selection screen (used by the multi-profile system).
-#define GUI_PROFILE_MAX 16
-
-enum {
-    GUI_PROFILE_SELECT = 0,
-    GUI_PROFILE_NEW,
-    GUI_PROFILE_RENAME,
-    GUI_PROFILE_DELETE
-};
-
-int guiShowProfileMenu(const char **names, const int *ids, int count, const char *activeName,
-                       int *selectedIndex, int *actionIndex);
-
 void guiUpdateScrollSpeed(void);
 void guiUpdateScreenScale(void);
 

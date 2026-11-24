@@ -890,6 +890,9 @@ static int gPS5BoldFont = -1;
 static int gPS5HeaderFont = -1;
 static int gPS5TitleFont = -1;
 static int gPS5SmallFont = -1;
+static int gPS5ProfileTitleFont = -1;
+static int gPS5ProfileSubFont = -1;
+static int gPS5TinyFont = -1;
 static float gPS5AnimPos = -1.0f;
 
 int gPS5ActiveTab = 0; // 0 = Games, 1 = Settings, 2 = Apps
@@ -932,6 +935,15 @@ static void initPS5MaskTextures(void)
     gPS5TitleFont = fntLoadFileMem(&roboto_bold_raw, size_roboto_bold_raw, 34);
     gPS5SmallFont = fntLoadFileMem(&roboto_regular_raw, size_roboto_regular_raw, 13);
     gPS5SemiBoldFont = fntLoadFileMem(&roboto_semi_bold_raw, size_roboto_semi_bold_raw, 16);
+    // Sizes used by the native profile screens. They match the reference
+    // artwork (40 px title at 720p, i.e. 26 px on the 480 line screen).
+    gPS5ProfileTitleFont = fntLoadFileMem(&roboto_regular_raw, size_roboto_regular_raw, 26);
+    gPS5ProfileSubFont = fntLoadFileMem(&roboto_regular_raw, size_roboto_regular_raw, 17);
+    gPS5TinyFont = fntLoadFileMem(&roboto_regular_raw, size_roboto_regular_raw, 9);
+    if (gPS5ProfileTitleFont == -1)
+        gPS5ProfileTitleFont = 0;
+    if (gPS5ProfileSubFont == -1)
+        gPS5ProfileSubFont = 0;
     gPS5BoldFont = gPS5HeaderFont; // Compatibility fallback
     if (gPS5HeaderFont != -1 && gPS5TitleFont != -1) {
         LOG("THEMES Loaded PS5 bold header (20) and title (34) fonts from embedded roboto_bold\n");
@@ -1034,6 +1046,11 @@ static void initPS5MaskTextures(void)
     gPS5MasksInitialized = 1;
 }
 
+void thmEnsurePS5UI(void)
+{
+    initPS5MaskTextures();
+}
+
 int thmGetPS5TitleFont(void)
 {
     return gPS5TitleFont != -1 ? gPS5TitleFont : 0;
@@ -1047,6 +1064,26 @@ int thmGetPS5HeaderFont(void)
 int thmGetPS5SemiBoldFont(void)
 {
     return gPS5SemiBoldFont != -1 ? gPS5SemiBoldFont : 0;
+}
+
+int thmGetPS5SmallFont(void)
+{
+    return gPS5SmallFont != -1 ? gPS5SmallFont : thmGetPS5SemiBoldFont();
+}
+
+int thmGetPS5ProfileTitleFont(void)
+{
+    return gPS5ProfileTitleFont != -1 ? gPS5ProfileTitleFont : thmGetPS5TitleFont();
+}
+
+int thmGetPS5ProfileSubFont(void)
+{
+    return gPS5ProfileSubFont != -1 ? gPS5ProfileSubFont : 0;
+}
+
+int thmGetPS5TinyFont(void)
+{
+    return gPS5TinyFont != -1 ? gPS5TinyFont : thmGetPS5SmallFont();
 }
 
 static void rmDrawRawQuad(GSTEXTURE *txt, int x1, int y1, int x2, int y2, int u1, int v1, int u2, int v2, u64 color)

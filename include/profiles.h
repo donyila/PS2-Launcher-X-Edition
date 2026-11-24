@@ -23,6 +23,11 @@ const char *profilesGetRoot(void);
 int profilesGetCount(void);
 int profilesGetId(int index);
 const char *profilesGetName(int index);
+
+// Stored profile picture name ("profile_3.img") or "" when the default
+// user.png picture is used.
+const char *profilesGetImage(int index);
+
 int profilesFindIndex(int id);
 
 int profilesGetActiveId(void);
@@ -35,6 +40,29 @@ int profilesClearActive(void);
 int profilesShowSelection(void);
 
 int profilesIsValidName(const char *name);
+
+// True when another profile already uses this display name (case insensitive).
+// ignoreId lets a rename keep its own current name. Pass 0 to check all.
+int profilesNameInUse(const char *name, int ignoreId);
+
+// Create, rename or delete a profile. These are the only entry points the UI
+// uses, so the numeric ID and the profile directory of an existing profile can
+// never change. imageName is "" for the default picture or a validated
+// profile_N.img name.
+int profilesCreateProfile(const char *name, const char *imageName, int *outId);
+int profilesRenameProfile(int id, const char *name);
+int profilesDeleteProfile(int id);
+int profilesSetProfileImage(int id, const char *imageName);
+
+// Absolute device path of a profile picture: <root>/profile_img/<name>.
+int profilesImagePath(const char *imageName, char *path, int pathLen);
+
+// Select the physical PlayStation 2 Memory Card as the save destination.
+// Clears the active profile and disables the profile VMC redirection so the
+// original launcher memory card slot behaviour is used. Returns 0 when no
+// usable memory card is detected.
+int profilesSelectMemoryCard(void);
+int profilesIsPhysicalMC(void);
 
 // True when the given device path (e.g. "mass0:/DVD/") is on the storage device
 // that owns the profiles directory.

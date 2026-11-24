@@ -63,6 +63,7 @@ enum GAME_MENU_IDs {
     GAME_DELETE_GAME,
     GAME_PS5_MODE_BASE = 100,
     GAME_PS5_GSM_RESOLUTION = 120,
+    GAME_PS5_PLAY = 121,
 };
 
 #define PS5_SMB_SETTINGS_COUNT 11
@@ -473,6 +474,7 @@ void menuInitGameMenu(void)
         submenuDestroy(&gameMenu);
 
     if (gPS5Mode) {
+        submenuAppendItem(&gameMenu, -1, "Play Game", GAME_PS5_PLAY, -1);
         submenuAppendItem(&gameMenu, -1, "Resolution", GAME_PS5_GSM_RESOLUTION, -1);
         submenuAppendItem(&gameMenu, -1, "Mode 1", GAME_PS5_MODE_BASE, -1);
         submenuAppendItem(&gameMenu, -1, "Mode 2", GAME_PS5_MODE_BASE + 1, -1);
@@ -480,6 +482,28 @@ void menuInitGameMenu(void)
         submenuAppendItem(&gameMenu, -1, "Mode 4", GAME_PS5_MODE_BASE + 3, -1);
         submenuAppendItem(&gameMenu, -1, "Mode 5", GAME_PS5_MODE_BASE + 4, -1);
         submenuAppendItem(&gameMenu, -1, "Mode 6", GAME_PS5_MODE_BASE + 5, -1);
+
+        // Keep the original per-game tools reachable from the PS5 game options
+        // screen. They existed in the classic menu but were previously hidden in
+        // the PS5 layout, which made cheat, GSM, VMC and advanced settings
+        // inaccessible.
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_COMPAT_SETTINGS, _STR_COMPAT_SETTINGS);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_CHEAT_SETTINGS, _STR_CHEAT_SETTINGS);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_GSM_SETTINGS, _STR_GSCONFIG);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_VMC_SETTINGS, _STR_VMC_SCREEN);
+#ifdef PADEMU
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_PADEMU_SETTINGS, _STR_PADEMUCONFIG);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_PADMACRO_SETTINGS, _STR_PADMACROCONFIG);
+#endif
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_OSD_LANGUAGE_SETTINGS, _STR_OSD_SETTINGS);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_SAVE_CHANGES, _STR_SAVE_CHANGES);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_TEST_CHANGES, _STR_TEST);
+        submenuAppendItem(&gameMenu, -1, NULL, GAME_REMOVE_CHANGES, _STR_REMOVE_ALL_SETTINGS);
+        if (gEnableWrite) {
+            submenuAppendItem(&gameMenu, -1, NULL, GAME_RENAME_GAME, _STR_RENAME);
+            submenuAppendItem(&gameMenu, -1, NULL, GAME_DELETE_GAME, _STR_DELETE);
+        }
+
         gameMenuCurrent = gameMenu;
         return;
     }
@@ -3334,43 +3358,33 @@ void menuRenderGameMenu()
             fntRenderString(gTheme->fonts[1], titleX, 36, ALIGN_LEFT, 0.78f, 0.78f, "Game Options", GS_SETREG_RGBA(0x58, 0x58, 0x58, 0x56));
         }
 
-        {
-            int resY = listY;
-            int focused = selected == 0;
+        index = 0;
+        for (it = gameMenu; it; it = it->next, index++) {
+            int y = listY + index * rowStep;
+            int focused = it == gameMenuCurrent;
+            int menuID = it->item.id;
             int rowFont = focused ? semiBoldFont : gTheme->fonts[1];
-            if (resY >= listTop - rowStep && resY <= listBottom + rowStep) {
-                if (focused)
-                    drawPS5GameFocusIndicator(labelX, resY);
-                fntRenderString(rowFont, labelX, resY, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, "Resolution", focused ? focusedColor : rowColor);
-                ps5GameOptionValue(GAME_PS5_GSM_RESOLUTION, value, sizeof(value));
-                {
-                    char resValue[80];
-                    snprintf(resValue, sizeof(resValue), "<%s>", value);
-                    fntRenderString(rowFont, labelX + rowW, resY, ALIGN_RIGHT | ALIGN_VCENTER, 0, 0, resValue, focused ? focusedColor : rowColor);
-                }
-            }
-        }
-
-        for (index = 0; index < COMPAT_MODE_COUNT; index++) {
-            int y = listY + (index + 1) * rowStep;
-            int focused = selected == index + 1;
-            int enabled = (ps5GameCompatMode & (1 << index)) != 0;
             u64 text = focused ? focusedColor : rowColor;
-            u64 status = focused ? focusedColor : rowColor;
-            int rowFont = focused ? semiBoldFont : gTheme->fonts[1];
+            const char *label = submenuItemGetText(&it->item);
 
             if (y < listTop - rowStep || y > listBottom + rowStep)
                 continue;
-            snprintf(value, sizeof(value), "Mode %d", index + 1);
             if (focused)
                 drawPS5GameFocusIndicator(labelX, y);
-            fntRenderString(rowFont, labelX, y, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, value, text);
-            fntRenderString(rowFont, labelX + rowW, y, ALIGN_RIGHT | ALIGN_VCENTER, 0, 0, enabled ? "<On>" : "<Off>", status);
+            fntRenderString(rowFont, labelX, y, ALIGN_LEFT | ALIGN_VCENTER, 0, 0, label, text);
+
+            if (menuID == GAME_PS5_GSM_RESOLUTION || (menuID >= GAME_PS5_MODE_BASE && menuID < GAME_PS5_MODE_BASE + COMPAT_MODE_COUNT)) {
+                char optionValue[80];
+                ps5GameOptionValue(menuID, value, sizeof(value));
+                snprintf(optionValue, sizeof(optionValue), "<%s>", value);
+                fntRenderString(rowFont, labelX + rowW, y, ALIGN_RIGHT | ALIGN_VCENTER, 0, 0, optionValue, text);
+            }
         }
 
         {
-            int nextX = drawPS5GameIconAndText(CROSS_ICON, "Play", semiBoldFont, listX, footerY, footerColor);
-            drawPS5GameIconAndText(SQUARE_ICON, "Save", semiBoldFont, nextX + 22, footerY, footerColor);
+            int nextX = drawPS5GameIconAndText(CROSS_ICON, "Select", semiBoldFont, listX, footerY, footerColor);
+            nextX = drawPS5GameIconAndText(SQUARE_ICON, "Save", semiBoldFont, nextX + 22, footerY, footerColor);
+            (void)nextX;
             drawPS5GameRightIconAndText(CIRCLE_ICON, "Close", semiBoldFont, ps5Width - 64, footerY, footerColor);
         }
         return;
@@ -3430,6 +3444,45 @@ void menuRenderGameMenu()
 
     // hints
     guiDrawSubMenuHints();
+}
+
+// Shared by the classic game menu and the PS5 game options screen so every
+// original per-game tool stays reachable from both layouts.
+static void menuExecuteGameMenuAction(int menuID, int sourceId, item_list_t *sourceSupport)
+{
+    if (menuID == GAME_COMPAT_SETTINGS) {
+        guiGameShowCompatConfig(sourceId, sourceSupport, itemConfig);
+    } else if (menuID == GAME_CHEAT_SETTINGS) {
+        guiGameShowCheatConfig();
+    } else if (menuID == GAME_GSM_SETTINGS) {
+        guiGameShowGSConfig();
+    } else if (menuID == GAME_VMC_SETTINGS) {
+        guiGameShowVMCMenu(sourceId, sourceSupport);
+#ifdef PADEMU
+    } else if (menuID == GAME_PADEMU_SETTINGS) {
+        guiGameShowPadEmuConfig(0);
+    } else if (menuID == GAME_PADMACRO_SETTINGS) {
+        guiGameShowPadMacroConfig(0);
+#endif
+    } else if (menuID == GAME_OSD_LANGUAGE_SETTINGS) {
+        guiGameShowOSDLanguageConfig(0);
+    } else if (menuID == GAME_SAVE_CHANGES) {
+        if (guiGameSaveConfig(itemConfig, sourceSupport))
+            configSetInt(itemConfig, CONFIG_ITEM_CONFIGSOURCE, CONFIG_SOURCE_USER);
+        menuSaveConfig();
+        saveConfig(CONFIG_GAME, 0);
+        guiMsgBox(_l(_STR_GAME_SETTINGS_SAVED), 0, NULL);
+        guiGameLoadConfig(sourceSupport, gameMenuLoadConfig(NULL));
+    } else if (menuID == GAME_TEST_CHANGES) {
+        guiGameTestSettings(sourceId, sourceSupport, itemConfig);
+    } else if (menuID == GAME_REMOVE_CHANGES) {
+        if (guiGameShowRemoveSettings(itemConfig, configGetByType(CONFIG_GAME)))
+            guiGameLoadConfig(sourceSupport, gameMenuLoadConfig(NULL));
+    } else if (menuID == GAME_RENAME_GAME) {
+        menuRenameGame(&gameMenu);
+    } else if (menuID == GAME_DELETE_GAME) {
+        menuDeleteGame(&gameMenu);
+    }
 }
 
 static void ps5GameOptionChange(int menuID, int direction)
@@ -3504,12 +3557,22 @@ void menuHandleInputGameMenu()
             sfxPlay(SFX_CURSOR);
             ps5GameOptionChange(menuID, 1);
         } else if (getKeyOn(KEY_CROSS)) {
-            sfxPlay(SFX_CONFIRM);
-            ps5GameOptionsSave(itemConfig);
-            if (sourceSupport != NULL && sourceId >= 0) {
-                if (!(sourceSupport->mode >= BDM_MODE && sourceSupport->mode < ETH_MODE))
-                    ps5DrawLaunchLoadingTransition();
-                sourceSupport->itemLaunch(sourceSupport, sourceId, itemConfig);
+            if (menuID == GAME_PS5_PLAY) {
+                sfxPlay(SFX_CONFIRM);
+                ps5GameOptionsSave(itemConfig);
+                if (sourceSupport != NULL && sourceId >= 0) {
+                    if (!(sourceSupport->mode >= BDM_MODE && sourceSupport->mode < ETH_MODE))
+                        ps5DrawLaunchLoadingTransition();
+                    sourceSupport->itemLaunch(sourceSupport, sourceId, itemConfig);
+                }
+            } else if (menuID == GAME_PS5_GSM_RESOLUTION || (menuID >= GAME_PS5_MODE_BASE && menuID < GAME_PS5_MODE_BASE + COMPAT_MODE_COUNT)) {
+                sfxPlay(SFX_CONFIRM);
+                ps5GameOptionChange(menuID, 1);
+            } else {
+                sfxPlay(SFX_CONFIRM);
+                menuExecuteGameMenuAction(menuID, sourceId, sourceSupport);
+                // Dialogs may reload the game config, so resync the PS5 view.
+                ps5GameOptionsLoad(itemConfig);
             }
             readPads();
         } else if (getKeyOn(KEY_SQUARE)) {
@@ -3557,40 +3620,7 @@ void menuHandleInputGameMenu()
 
         sfxPlay(SFX_CONFIRM);
 
-        if (menuID == GAME_COMPAT_SETTINGS) {
-            guiGameShowCompatConfig(sourceId, sourceSupport, itemConfig);
-        } else if (menuID == GAME_CHEAT_SETTINGS) {
-            guiGameShowCheatConfig();
-        } else if (menuID == GAME_GSM_SETTINGS) {
-            guiGameShowGSConfig();
-        } else if (menuID == GAME_VMC_SETTINGS) {
-            guiGameShowVMCMenu(sourceId, sourceSupport);
-#ifdef PADEMU
-        } else if (menuID == GAME_PADEMU_SETTINGS) {
-            guiGameShowPadEmuConfig(0);
-        } else if (menuID == GAME_PADMACRO_SETTINGS) {
-            guiGameShowPadMacroConfig(0);
-#endif
-        } else if (menuID == GAME_OSD_LANGUAGE_SETTINGS) {
-            guiGameShowOSDLanguageConfig(0);
-        } else if (menuID == GAME_SAVE_CHANGES) {
-            if (guiGameSaveConfig(itemConfig, sourceSupport))
-                configSetInt(itemConfig, CONFIG_ITEM_CONFIGSOURCE, CONFIG_SOURCE_USER);
-            menuSaveConfig();
-            saveConfig(CONFIG_GAME, 0);
-            guiMsgBox(_l(_STR_GAME_SETTINGS_SAVED), 0, NULL);
-            guiGameLoadConfig(sourceSupport, gameMenuLoadConfig(NULL));
-        } else if (menuID == GAME_TEST_CHANGES) {
-            guiGameTestSettings(sourceId, sourceSupport, itemConfig);
-        } else if (menuID == GAME_REMOVE_CHANGES) {
-            if (guiGameShowRemoveSettings(itemConfig, configGetByType(CONFIG_GAME))) {
-                guiGameLoadConfig(sourceSupport, gameMenuLoadConfig(NULL));
-            }
-        } else if (menuID == GAME_RENAME_GAME) {
-            menuRenameGame(&gameMenu);
-        } else if (menuID == GAME_DELETE_GAME) {
-            menuDeleteGame(&gameMenu);
-        }
+        menuExecuteGameMenuAction(menuID, sourceId, sourceSupport);
         // so the exit press wont propagate twice
         readPads();
     }
