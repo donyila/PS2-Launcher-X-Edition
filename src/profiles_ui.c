@@ -131,20 +131,59 @@ static u64 uiColor(int r, int g, int b, int a)
     return GS_SETREG_RGBA(r, g, b, a);
 }
 
-static u64 uiFocusColor(float focus, int alpha)
+static void uiFocusChannels(float focus, int *r, int *g, int *b)
 {
-    int r, g, b;
-
     if (focus < 0.0f)
         focus = 0.0f;
     if (focus > 1.0f)
         focus = 1.0f;
 
-    r = UI_WHITE + uiRound((UI_BLUE_R - UI_WHITE) * focus);
-    g = UI_WHITE + uiRound((UI_BLUE_G - UI_WHITE) * focus);
-    b = UI_WHITE + uiRound((UI_BLUE_B - UI_WHITE) * focus);
+    *r = UI_WHITE + uiRound((UI_BLUE_R - UI_WHITE) * focus);
+    *g = UI_WHITE + uiRound((UI_BLUE_G - UI_WHITE) * focus);
+    *b = UI_WHITE + uiRound((UI_BLUE_B - UI_WHITE) * focus);
+}
 
+// Colour for untextured primitives (rectangles, fonts): 0x00..0xFF.
+static u64 uiFocusColor(float focus, int alpha)
+{
+    int r, g, b;
+
+    uiFocusChannels(focus, &r, &g, &b);
     return uiColor(r, g, b, alpha);
+}
+
+// Colours passed to rmDrawPixmap are texture modulation values, and the GS
+// treats 0x80 per channel as "keep the texel unchanged" (0xFF doubles it and
+// clamps to white). Mapping into that range is what lets the grey disc stay
+// #7F7F7F instead of saturating to white and hiding the white icons on top.
+static int uiTintChannel(int value)
+{
+    if (value <= 0)
+        return 0;
+    if (value >= 255)
+        return 0x80;
+
+    return (value * 0x80 + 127) / 255;
+}
+
+static u64 uiTextureTint(int r, int g, int b)
+{
+    return uiColor(uiTintChannel(r), uiTintChannel(g), uiTintChannel(b), 0x80);
+}
+
+// Draws every texel exactly as it was built.
+static u64 uiWhiteTint(void)
+{
+    return uiColor(0x80, 0x80, 0x80, 0x80);
+}
+
+// White ring texture tinted with the white -> #00B0F0 focus colour.
+static u64 uiFocusTintColor(float focus)
+{
+    int r, g, b;
+
+    uiFocusChannels(focus, &r, &g, &b);
+    return uiTextureTint(r, g, b);
 }
 
 static float uiSmoothStep(float t)
@@ -411,6 +450,10 @@ static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
     png_set_expand(pngPtr);
     png_set_gray_to_rgb(pngPtr);
     png_set_tRNS_to_alpha(pngPtr);
+    // Interlaced files (Adam7) are read as one progressive image. Without this
+    // libpng leaves every pass but the last mostly empty, which is what a
+    // "blank" profile picture looks like after compositing.
+    png_set_interlace_handling(pngPtr);
     png_read_update_info(pngPtr, infoPtr);
 
     if (png_get_channels(pngPtr, infoPtr) == 3) {
@@ -686,13 +729,13 @@ static void uiEnsureAvatars(float animPos, int itemCount)
 static void uiDrawDisc(int x, int y, int size)
 {
     if (uiDiscTex.Mem)
-        rmDrawPixmap(&uiDiscTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(&uiDiscTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
 }
 
 static void uiDrawRing(int x, int y, int size, float focus)
 {
     if (uiRingTex.Mem)
-        rmDrawPixmap(&uiRingTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiFocusColor(focus, 0x80));
+        rmDrawPixmap(&uiRingTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiFocusTintColor(focus));
 }
 
 static void uiDrawDefaultAvatar(int x, int y, int size)
@@ -700,7 +743,7 @@ static void uiDrawDefaultAvatar(int x, int y, int size)
     int icon = (size * 62) / 100;
 
     if (uiUserTex.Mem) {
-        rmDrawPixmap(&uiUserTex, x, y, ALIGN_CENTER, icon, icon, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(&uiUserTex, x, y, ALIGN_CENTER, icon, icon, SCALING_RATIO, uiWhiteTint());
     } else {
         // Fallback if the embedded PNG could not be loaded: a white rounded
         // square, still the same silhouette as user.png.
@@ -713,7 +756,7 @@ static void uiDrawAvatar(int x, int y, int size, const char *imageName)
     GSTEXTURE *avatar = uiAvatarFor(imageName);
 
     if (avatar != NULL) {
-        rmDrawPixmap(avatar, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(avatar, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
     } else {
         uiDrawDefaultAvatar(x, y, size);
     }
@@ -722,7 +765,7 @@ static void uiDrawAvatar(int x, int y, int size, const char *imageName)
 static void uiDrawAddUserIcon(int x, int y, int size)
 {
     if (uiPlusTex.Mem)
-        rmDrawPixmap(&uiPlusTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(&uiPlusTex, x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
 }
 
 static void uiDrawMemoryCardIcon(int x, int y, int size)
@@ -730,7 +773,7 @@ static void uiDrawMemoryCardIcon(int x, int y, int size)
     if (uiMemoryCardTex.Mem) {
         // memory_card.png is 311x375, so keep that aspect ratio instead of
         // stretching the icon into a square.
-        rmDrawPixmap(&uiMemoryCardTex, x, y, ALIGN_CENTER, (size * 42) / 100, (size * 51) / 100, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(&uiMemoryCardTex, x, y, ALIGN_CENTER, (size * 42) / 100, (size * 51) / 100, SCALING_RATIO, uiWhiteTint());
     } else {
         int card = (size * 34) / 100;
         rmDrawRoundedRect(x - card / 2, y - card * 6 / 10, card, card * 12 / 10, 3, uiColor(255, 255, 255, 0x80));
@@ -742,7 +785,7 @@ static void uiDrawLogo(void)
     int y = uiY(UI_LOGO_Y);
 
     if (uiPs2LogoTex.Mem) {
-        rmDrawPixmap(&uiPs2LogoTex, uiX(UI_DW / 2), y, ALIGN_CENTER, uiD(UI_LOGO_W), uiD(UI_LOGO_H), SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+        rmDrawPixmap(&uiPs2LogoTex, uiX(UI_DW / 2), y, ALIGN_CENTER, uiD(UI_LOGO_W), uiD(UI_LOGO_H), SCALING_RATIO, uiWhiteTint());
     } else {
         fntRenderString(uiFontLabel, uiX(UI_DW / 2), y, ALIGN_CENTER, 0, 0, "PS2", uiColor(255, 255, 255, 0x80));
     }
@@ -1103,6 +1146,40 @@ static void uiFreeThumbnails(void)
     }
 }
 
+// True when profile_<index + 1>.png was found, decoded and turned into a
+// texture. Only these slots can be confirmed, so the cursor must never rest on
+// a slot the USB stick does not provide.
+static int uiThumbnailAvailable(int index)
+{
+    return index >= 0 && index < PROFILE_IMAGE_COUNT &&
+           uiThumbState[index] == 1 && uiThumbs[index].Mem != NULL;
+}
+
+static int uiThumbnailStep(int focus, int step)
+{
+    int next = focus + step;
+
+    while (next >= 0 && next < PROFILE_IMAGE_COUNT) {
+        if (uiThumbnailAvailable(next))
+            return next;
+        next += step;
+    }
+
+    return focus;
+}
+
+static int uiThumbnailFirstAvailable(void)
+{
+    int i;
+
+    for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
+        if (uiThumbnailAvailable(i))
+            return i;
+    }
+
+    return -1;
+}
+
 int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
 {
     int focus = uiImageIndex(currentImage);
@@ -1111,6 +1188,16 @@ int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
     int done = 0;
 
     uiLoadThumbnails();
+
+    // Start on a picture that actually exists, not on an empty slot.
+    if (!uiThumbnailAvailable(focus)) {
+        int available = uiThumbnailFirstAvailable();
+
+        if (available >= 0) {
+            focus = available;
+            animPos = (float)focus;
+        }
+    }
 
     while (!done) {
         int i;
@@ -1138,7 +1225,7 @@ int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
             uiDrawDisc(x, y, size);
 
             if (uiThumbState[i] == 1 && uiThumbs[i].Mem) {
-                rmDrawPixmap(&uiThumbs[i], x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiColor(255, 255, 255, 0x80));
+                rmDrawPixmap(&uiThumbs[i], x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
             } else {
                 char label[24];
                 snprintf(label, sizeof(label), "profile_%d.png", i + 1);
@@ -1153,23 +1240,35 @@ int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
 
         if (getKey(KEY_LEFT)) {
             if (focus % 5 > 0) {
-                focus--;
-                uiPlayCursor();
+                int next = uiThumbnailStep(focus, -1);
+                if (next != focus) {
+                    focus = next;
+                    uiPlayCursor();
+                }
             }
         } else if (getKey(KEY_RIGHT)) {
             if (focus % 5 < 4) {
-                focus++;
-                uiPlayCursor();
+                int next = uiThumbnailStep(focus, 1);
+                if (next != focus) {
+                    focus = next;
+                    uiPlayCursor();
+                }
             }
         } else if (getKey(KEY_UP)) {
             if (focus >= 5) {
-                focus -= 5;
-                uiPlayCursor();
+                int next = uiThumbnailStep(focus, -5);
+                if (next != focus) {
+                    focus = next;
+                    uiPlayCursor();
+                }
             }
         } else if (getKey(KEY_DOWN)) {
             if (focus < 5) {
-                focus += 5;
-                uiPlayCursor();
+                int next = uiThumbnailStep(focus, 5);
+                if (next != focus) {
+                    focus = next;
+                    uiPlayCursor();
+                }
             }
         }
 
