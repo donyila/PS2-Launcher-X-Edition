@@ -644,6 +644,68 @@ int profilesImagePath(const char *imageName, char *path, int pathLen)
     return profilesPathProfileImage(path, pathLen, profilesRoot, imageName);
 }
 
+static int profilesFileExists(const char *path)
+{
+    int fd = open(path, O_RDONLY);
+
+    if (fd < 0)
+        return 0;
+
+    close(fd);
+    return 1;
+}
+
+// The profile root is chosen from the game device. The picture folder is a
+// plain folder on the USB stick (mass0:/profile_img/...), which can end up on a
+// different massN: port than the games after the stick is moved. Trying the
+// profile device first and then every other mounted mass device keeps custom
+// pictures working without inventing a new storage location: only the standard
+// <root>/profile_img/<name> path is ever used.
+int profilesResolveImagePath(const char *imageName, char *path, int pathLen)
+{
+    char root[16];
+    char candidate[PROFILE_PATH_MAX];
+    int i;
+
+    if (!profilesReady || imageName == NULL || path == NULL || pathLen < 2)
+        return 0;
+
+    path[0] = '\0';
+
+    if (!profilesNameImageIsValid(imageName)) {
+        LOG("PROFILES Rejected profile picture name '%s'\n", imageName);
+        return 0;
+    }
+
+    if (profilesImagePath(imageName, candidate, sizeof(candidate))) {
+        if (profilesFileExists(candidate)) {
+            snprintf(path, pathLen, "%s", candidate);
+            return 1;
+        }
+        LOG("PROFILES Profile picture not on %s: %s\n", profilesRoot, candidate);
+    }
+
+    for (i = 0; i < MAX_BDM_DEVICES; i++) {
+        snprintf(root, sizeof(root), "mass%d:/", i);
+
+        if (strcmp(root, profilesRoot) == 0)
+            continue;
+
+        if (!profilesPathProfileImage(candidate, sizeof(candidate), root, imageName))
+            continue;
+
+        if (profilesFileExists(candidate)) {
+            LOG("PROFILES Profile picture found on another device: %s\n", candidate);
+            snprintf(path, pathLen, "%s", candidate);
+            return 1;
+        }
+    }
+
+    LOG("PROFILES Profile picture unavailable: <root>/profile_img/%s on %s and mass0-mass%d\n",
+        imageName, profilesRoot, MAX_BDM_DEVICES - 1);
+    return 0;
+}
+
 int profilesNameInUse(const char *name, int ignoreId)
 {
     int i;
@@ -890,6 +952,13 @@ static int profilesDelete(int id)
     if (index < 0)
         return 0;
 
+    // Never leave the launcher without a usable profile. The UI checks this as
+    // well so it can explain why, but the storage layer refuses independently.
+    if (profileCount <= 1) {
+        LOG("PROFILES Refusing to delete the last profile (%d)\n", id);
+        return 0;
+    }
+
     if (!profilesBuildProfileDir(id, profileDir, sizeof(profileDir)))
         return 0;
 
@@ -907,8 +976,12 @@ static int profilesDelete(int id)
     memmove(&profiles[index], &profiles[index + 1], (profileCount - index - 1) * sizeof(profile_entry_t));
     profileCount--;
 
-    if (!profilesSaveIndex()) {
-        LOG("PROFILES Could not update profiles.dat after deleting %d\n", id);
+    // The profile directory is already gone, so the index must lose the entry:
+    // otherwise the next start would offer a profile with no data. Retry once,
+    // and keep the in-memory list consistent either way (any later successful
+    // index write also repairs the file).
+    if (!profilesSaveIndex() && !profilesSaveIndex()) {
+        LOG("PROFILES Could not update profiles.dat after deleting %d; the change is active for this session\n", id);
         return 0;
     }
 
@@ -1228,10 +1301,15 @@ static void profilesHandleDelete(int index)
     if (index < 0 || index >= profileCount)
         return;
 
+    if (profileCount <= 1) {
+        profilesUiMessage("Cannot Delete Profile", "At least one profile must remain so the launcher always starts with a valid profile.");
+        return;
+    }
+
     id = profiles[index].id;
     snprintf(message, sizeof(message), "Delete profile \"%s\"?\n\nIts memory card saves will be deleted too.", profiles[index].name);
 
-    if (!profilesUiConfirm("Delete Profile", message, "Delete", "Cancel"))
+    if (!profilesUiConfirm("Delete Profile", message, "Yes, Delete", "No, Cancel"))
         return;
 
     if (!profilesDelete(id)) {
@@ -1243,6 +1321,124 @@ static void profilesHandleDelete(int index)
         profileSelectedIndex = profileCount + 1;
     if (profileSelectedIndex < 0)
         profileSelectedIndex = 0;
+}
+
+// ----------------------------------------------------------
+// --------------- Settings -> Users management --------------
+// ----------------------------------------------------------
+
+// Edit User: rename and/or change the picture. Both operations address the
+// profile by its numeric ID, so its directory (and every VMC in it) is only
+// ever touched through the same ID and never renamed or moved.
+static void profilesHandleEdit(int index)
+{
+    char name[PROFILE_NAME_MAX + 1];
+    char image[PROFILE_IMAGE_NAME_MAX + 1];
+    char oldName[PROFILE_NAME_MAX + 1];
+    char oldImage[PROFILE_IMAGE_NAME_MAX + 1];
+    int id;
+
+    if (index < 0 || index >= profileCount)
+        return;
+
+    id = profiles[index].id;
+    snprintf(name, sizeof(name), "%s", profiles[index].name);
+    snprintf(image, sizeof(image), "%s", profiles[index].image);
+    snprintf(oldName, sizeof(oldName), "%s", name);
+    snprintf(oldImage, sizeof(oldImage), "%s", image);
+
+    if (!profilesUiEditUser(name, sizeof(name), image, sizeof(image)))
+        return;
+
+    profilesNormalizeName(name, name, sizeof(name));
+
+    if (!profilesIsValidName(name)) {
+        profilesUiMessage("Invalid Name", "Enter 1-23 characters without : / \\ |.");
+        return;
+    }
+
+    if (profilesNameInUse(name, id)) {
+        profilesUiMessage("Name In Use", "Another profile already has that name.");
+        return;
+    }
+
+    if (strcmp(name, oldName) != 0 && !profilesRename(id, name)) {
+        profilesUiMessage("Could Not Rename User", "The new name could not be saved.\nCheck the USB device.");
+        return;
+    }
+
+    if (strcmp(image, oldImage) != 0 && !profilesSetProfileImage(id, image)) {
+        profilesUiMessage("Could Not Save Picture", "The picture could not be stored in profile.ini.\nCheck the USB device.");
+        return;
+    }
+
+    LOG("PROFILES Updated profile %d (name '%s', picture '%s')\n", id, name, image[0] ? image : "user.png");
+}
+
+static void profilesHandleDeleteManaged(int index)
+{
+    char message[224];
+    int id;
+
+    if (index < 0 || index >= profileCount)
+        return;
+
+    if (profileCount <= 1) {
+        profilesUiMessage("Cannot Delete User", "At least one profile must remain so the launcher always starts with a valid profile.");
+        return;
+    }
+
+    id = profiles[index].id;
+    snprintf(message, sizeof(message), "Delete user \"%s\"?\n\nThis removes the profile and the memory card saves stored for it.", profiles[index].name);
+
+    if (!profilesUiConfirm("Delete User", message, "Yes, Delete", "No, Cancel"))
+        return;
+
+    if (!profilesDelete(id)) {
+        profilesUiMessage("Could Not Delete User", "The profile could not be deleted.\nNo other profile was touched.\nCheck the USB device and try again.");
+        return;
+    }
+
+    LOG("PROFILES Deleted profile %d from the Users screen\n", id);
+}
+
+int profilesShowManagement(void)
+{
+    int selectedIndex = 0;
+    int action = -1;
+    int profileIndex = -1;
+
+    if (!profilesInitialized)
+        profilesInit();
+
+    if (!profilesReady)
+        return 0;
+
+    if (profileCount <= 0) {
+        LOG("PROFILES Users screen opened without any profile\n");
+        return 0;
+    }
+
+    profilesUiBegin();
+
+    for (;;) {
+        if (profileCount <= 0)
+            break;
+
+        if (!profilesUiUsers(&selectedIndex, &action, &profileIndex))
+            break;
+
+        if (profileIndex < 0 || profileIndex >= profileCount)
+            continue;
+
+        if (action == PROFILES_UI_USERS_EDIT)
+            profilesHandleEdit(profileIndex);
+        else if (action == PROFILES_UI_USERS_DELETE)
+            profilesHandleDeleteManaged(profileIndex);
+    }
+
+    profilesUiEnd();
+    return 1;
 }
 
 int profilesShowSelection(void)

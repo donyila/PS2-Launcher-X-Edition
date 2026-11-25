@@ -5,6 +5,7 @@
  PS2SDK is not required).
 */
 
+#include "include/profiles_grid.h"
 #include "include/profiles_path.h"
 
 #include <stdio.h>
@@ -220,6 +221,122 @@ static void testProfileNames(void)
     CHECK(profilesNameIsValid("tab\there") == 0);
 }
 
+// The profile directory and every VMC path are built from the numeric ID only.
+// Renaming a profile therefore cannot move its folder or invalidate an existing
+// VMC; this is the invariant Edit User relies on.
+static void testProfileIdentityIsStable(void)
+{
+    char dirA[PROFILE_PATH_MAX];
+    char dirB[PROFILE_PATH_MAX];
+    char vmcA[PROFILE_PATH_MAX];
+    char vmcB[PROFILE_PATH_MAX];
+
+    CHECK(profilesPathUser(dirA, sizeof(dirA), "mass0:/", 7) == 1);
+    CHECK(profilesPathUser(dirB, sizeof(dirB), "mass0:/", 7) == 1);
+    CHECK(strcmp(dirA, dirB) == 0);
+    CHECK(strstr(dirA, "000007") != NULL);
+
+    CHECK(profilesPathVmcFile(vmcA, sizeof(vmcA), "mass0:/", 7, "SLUS_200.62_0") == 1);
+    CHECK(profilesPathVmcFile(vmcB, sizeof(vmcB), "mass0:/", 7, "SLUS_200.62_0") == 1);
+    CHECK(strcmp(vmcA, vmcB) == 0);
+    CHECK(strstr(vmcA, "000007/VMC/") != NULL);
+
+    // Different IDs can never share a directory or a VMC file.
+    CHECK(profilesPathUser(dirB, sizeof(dirB), "mass0:/", 8) == 1);
+    CHECK(strcmp(dirA, dirB) != 0);
+}
+
+static void testPictureGridLayout(void)
+{
+    int row, col, i;
+    char name[PROFILE_IMAGE_NAME_MAX + 1];
+
+    // Ten pictures in two rows of five, the default tile centered below them.
+    profilesGridSlotPos(0, &row, &col);
+    CHECK(row == 0 && col == 0);
+    profilesGridSlotPos(4, &row, &col);
+    CHECK(row == 0 && col == 4);
+    profilesGridSlotPos(5, &row, &col);
+    CHECK(row == 1 && col == 0);
+    profilesGridSlotPos(9, &row, &col);
+    CHECK(row == 1 && col == 4);
+    profilesGridSlotPos(PROFILE_GRID_DEFAULT_SLOT, &row, &col);
+    CHECK(row == 2 && col == 2);
+
+    CHECK(profilesGridSlotAt(0, 0) == 0);
+    CHECK(profilesGridSlotAt(1, 3) == 8);
+    CHECK(profilesGridSlotAt(2, 2) == PROFILE_GRID_DEFAULT_SLOT);
+    CHECK(profilesGridSlotAt(2, 0) == -1);
+    CHECK(profilesGridSlotAt(1, 4) == 9);
+
+    for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
+        CHECK(profilesGridSlotImage(i, name, sizeof(name)) == 1);
+        CHECK(strcmp(name, "") != 0);
+    }
+
+    CHECK(profilesGridSlotImage(0, name, sizeof(name)) == 1 && strcmp(name, "profile_1.png") == 0);
+    CHECK(profilesGridSlotImage(9, name, sizeof(name)) == 1 && strcmp(name, "profile_10.png") == 0);
+    CHECK(profilesGridSlotImage(PROFILE_GRID_DEFAULT_SLOT, name, sizeof(name)) == 1 && name[0] == '\0');
+    CHECK(profilesGridSlotImage(PROFILE_GRID_TILE_COUNT, name, sizeof(name)) == 0);
+
+    CHECK(profilesGridSlotFromImage("") == PROFILE_GRID_DEFAULT_SLOT);
+    CHECK(profilesGridSlotFromImage(NULL) == PROFILE_GRID_DEFAULT_SLOT);
+    CHECK(profilesGridSlotFromImage("profile_3.png") == 2);
+    CHECK(profilesGridSlotFromImage("PROFILE_3.PNG") == 2);
+    CHECK(profilesGridSlotFromImage("profile_11.png") == -1);
+    CHECK(profilesGridSlotFromImage("user.png") == -1);
+}
+
+// The chooser must never move the focus onto an unavailable picture and must
+// never paint itself into a corner: the default tile is always selectable.
+static void testPictureGridNavigation(void)
+{
+    unsigned char available[PROFILE_GRID_TILE_COUNT];
+    int slot, direction;
+
+    // Only profile_2.png exists, but the default tile always exists too.
+    memset(available, 0, sizeof(available));
+    available[1] = 1;
+    available[PROFILE_GRID_DEFAULT_SLOT] = 1;
+
+    CHECK(profilesGridFirstAvailable(available) == 1);
+    CHECK(profilesGridMove(0, 0, 1, available) == 1);
+    CHECK(profilesGridMove(2, 0, -1, available) == 1);
+    // Nothing to the right/above from a missing tile: fall back to a selectable
+    // tile instead of parking the cursor on an unavailable picture.
+    CHECK(profilesGridMove(4, 0, 1, available) == 1);
+    CHECK(profilesGridMove(0, -1, 0, available) == 1);
+    CHECK(profilesGridMove(3, 0, -1, available) == 1);
+    CHECK(profilesGridMove(7, 1, 0, available) == PROFILE_GRID_DEFAULT_SLOT);
+    CHECK(profilesGridMove(PROFILE_GRID_DEFAULT_SLOT, -1, 0, available) == PROFILE_GRID_DEFAULT_SLOT);
+
+    // Only the default tile: every direction from every slot stays selectable.
+    memset(available, 0, sizeof(available));
+    available[PROFILE_GRID_DEFAULT_SLOT] = 1;
+    CHECK(profilesGridFirstAvailable(available) == PROFILE_GRID_DEFAULT_SLOT);
+
+    for (slot = 0; slot < PROFILE_GRID_TILE_COUNT; slot++) {
+        static const int steps[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+        for (direction = 0; direction < 4; direction++) {
+            int next = profilesGridMove(slot, steps[direction][0], steps[direction][1], available);
+            CHECK(available[next] == 1);
+        }
+    }
+
+    // A full stick: navigation visits every picture and never an empty tile.
+    memset(available, 0xFF, sizeof(available));
+    CHECK(profilesGridMove(0, 0, 1, available) == 1);
+    CHECK(profilesGridMove(4, 0, 1, available) == 4);
+    CHECK(profilesGridMove(4, 1, 0, available) == 9);
+    CHECK(profilesGridMove(9, -1, 0, available) == 4);
+    CHECK(profilesGridMove(7, 1, 0, available) == PROFILE_GRID_DEFAULT_SLOT);
+    CHECK(profilesGridMove(PROFILE_GRID_DEFAULT_SLOT, 1, 0, available) == PROFILE_GRID_DEFAULT_SLOT);
+
+    CHECK(profilesGridFirstAvailable(NULL) == -1);
+    CHECK(profilesGridMove(3, 0, 1, NULL) == 3);
+}
+
 int main(void)
 {
     testKnownPaths();
@@ -230,6 +347,9 @@ int main(void)
     testProfileImages();
     testPhysicalMemoryCard();
     testProfileNames();
+    testProfileIdentityIsStable();
+    testPictureGridLayout();
+    testPictureGridNavigation();
 
     if (failures != 0) {
         printf("%d of %d profile path checks failed\n", failures, checks);

@@ -12,6 +12,7 @@
 #include "include/sound.h"
 #include "include/bdmsupport.h"
 #include "include/supportbase.h"
+#include "include/profiles.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <malloc.h>
@@ -1415,7 +1416,7 @@ int gPS5SettingsSel = 0;
 #define PS5_SMB_SETTINGS_COUNT 11
 
 int gPS5TempVMode = 0;
-int gPS5SubSel = 7;
+int gPS5SubSel = 8; // Game Covers card, the previous initial focus
 unsigned int gPS5SaveNotifyFrame = 0; // Frame timing for toast popup
 unsigned int gPS5SaveBusyFrame = 0;
 unsigned int gPS5RefreshBusyFrame = 0;
@@ -3648,7 +3649,7 @@ static void drawPS5Launcher(struct menu_list *menu, struct submenu_list *item, s
             return;
         }
 
-        if (gPS5SubSel == 7 || gPS5SubSel == 8)
+        if (gPS5SubSel >= 8)
             settingsFocusY = rowY + (cardH / 2);
         else
             settingsFocusY = rowY + listTop + (gPS5SubSel * rowStep);
@@ -3712,12 +3713,25 @@ static void drawPS5Launcher(struct menu_list *menu, struct submenu_list *item, s
         drawPS5SettingsText(gPS5RegFont, rowX, rowY + listTop + (rowStep * 6), ALIGN_LEFT, "Controller", gPS5SubSel == 6);
         drawPS5SettingsText(gPS5RegFont, rightX, rowY + listTop + (rowStep * 6), ALIGN_RIGHT, controllerStr, gPS5SubSel == 6);
 
+        // Users: manage the created profiles (edit name/picture, delete).
+        {
+            char usersStr[64];
+
+            if (profilesAvailable())
+                snprintf(usersStr, sizeof(usersStr), "< %d >", profilesGetCount());
+            else
+                snprintf(usersStr, sizeof(usersStr), "Unavailable");
+
+            drawPS5SettingsText(gPS5RegFont, rowX, rowY + listTop + (rowStep * 7), ALIGN_LEFT, "Users", gPS5SubSel == 7);
+            drawPS5SettingsText(gPS5RegFont, rightX, rowY + listTop + (rowStep * 7), ALIGN_RIGHT, usersStr, gPS5SubSel == 7);
+        }
+
         // 4. Draw quick action cards.
         char coverSummary[96];
         char smbSummary[96];
         char coverButton[32];
-        int coverFocused = gPS5SubSel == 7;
-        int smbFocused = gPS5SubSel == 8;
+        int coverFocused = gPS5SubSel == 8;
+        int smbFocused = gPS5SubSel == 9;
         u64 idleCardColor = GS_SETREG_RGBA(0x1C, 0x1C, 0x1C, 0x80);
         u64 focusedCardColor = GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80);
         u64 idleHeadingColor = GS_SETREG_RGBA(0xFF, 0xFF, 0xFF, 0x80);

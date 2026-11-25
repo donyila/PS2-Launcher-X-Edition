@@ -17,6 +17,7 @@
 #include "include/gui.h"
 #include "include/ioman.h"
 #include "include/profiles.h"
+#include "include/profiles_grid.h"
 #include "include/profiles_ui.h"
 #include "include/themes.h"
 #include "include/fntsys.h"
@@ -99,8 +100,11 @@ static int uiAssetsReady;
 static ui_avatar_t uiAvatars[UI_AVATAR_SLOTS];
 static int uiAvatarTick;
 
-static GSTEXTURE uiThumbs[PROFILE_IMAGE_COUNT];
-static int uiThumbState[PROFILE_IMAGE_COUNT];
+// One tile per selectable picture plus the default user.png tile, so the
+// chooser always has at least one selectable option.
+static GSTEXTURE uiThumbs[PROFILE_GRID_TILE_COUNT];
+static int uiThumbState[PROFILE_GRID_TILE_COUNT];
+static int uiThumbLoaded;
 
 // ----------------------------------------------------------
 // ------------------------ Helpers -------------------------
@@ -372,6 +376,11 @@ typedef struct
     int offset;
 } ui_png_src_t;
 
+typedef struct
+{
+    char message[96];
+} ui_png_error_t;
+
 static void uiPngRead(png_structp pngPtr, png_bytep out, png_size_t length)
 {
     ui_png_src_t *src = (ui_png_src_t *)png_get_io_ptr(pngPtr);
@@ -381,6 +390,28 @@ static void uiPngRead(png_structp pngPtr, png_bytep out, png_size_t length)
 
     memcpy(out, src->data + src->offset, length);
     src->offset += (int)length;
+}
+
+// libpng reports every decode problem through this handler, which stores the
+// message and returns to uiDecodePng through its setjmp buffer. That message is
+// what makes a broken picture identifiable in the launcher log instead of just
+// "the picker is empty".
+static void uiPngError(png_structp pngPtr, png_const_charp message)
+{
+    ui_png_error_t *error = (ui_png_error_t *)png_get_error_ptr(pngPtr);
+
+    if (error != NULL) {
+        strncpy(error->message, message, sizeof(error->message) - 1);
+        error->message[sizeof(error->message) - 1] = '\0';
+    }
+
+    longjmp(png_jmpbuf(pngPtr), 1);
+}
+
+static void uiPngWarning(png_structp pngPtr, png_const_charp message)
+{
+    (void)pngPtr;
+    LOG("PROFILES_UI PNG warning: %s\n", message);
 }
 
 static void uiImageFree(ui_image_t *img)
@@ -393,42 +424,62 @@ static void uiImageFree(ui_image_t *img)
 }
 
 // Decodes a PNG buffer to 8-bit RGBA. Profile pictures are ordinary PNG files
-// loaded from <root>/profile_img/profile_N.png. The signature is checked
-// before parsing; anything else is rejected cleanly instead of being guessed at.
-static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
+// loaded from <root>/profile_img/profile_N.png. Any failure is written to
+// errorText so the caller can log exactly which stage rejected the file
+// (signature, libpng, size, format or memory) instead of silently hiding it.
+static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img, char *errorText, int errorLen)
 {
+    // Bounded above by the size check below (max 1600 rows). Kept static so a
+    // libpng longjmp can never leave a heap pointer dangling.
+    static png_bytep rows[1600];
     png_structp pngPtr = NULL;
     png_infop infoPtr = NULL;
     ui_png_src_t src;
-    png_bytep *rows = NULL;
+    ui_png_error_t errorCtx;
     png_uint_32 width, height;
-    int bitDepth, colorType;
-    int ok = 0;
+    int bitDepth, colorType, channels, hasTransparency;
     int y;
 
     img->rgba = NULL;
     img->w = 0;
     img->h = 0;
 
-    if (data == NULL || size < 8)
-        return 0;
+    if (errorText != NULL && errorLen > 0)
+        errorText[0] = '\0';
 
-    if (png_sig_cmp((png_bytep)data, 0, 8) != 0)
+    if (data == NULL || size < 8) {
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "empty file");
         return 0;
+    }
 
-    pngPtr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (pngPtr == NULL)
+    if (png_sig_cmp((png_bytep)data, 0, 8) != 0) {
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "not a PNG file (bad signature)");
         return 0;
+    }
+
+    errorCtx.message[0] = '\0';
+
+    pngPtr = png_create_read_struct(PNG_LIBPNG_VER_STRING, &errorCtx, uiPngError, uiPngWarning);
+    if (pngPtr == NULL) {
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "could not create the PNG reader");
+        return 0;
+    }
 
     infoPtr = png_create_info_struct(pngPtr);
     if (infoPtr == NULL) {
         png_destroy_read_struct(&pngPtr, NULL, NULL);
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "could not create the PNG info block");
         return 0;
     }
 
     if (setjmp(png_jmpbuf(pngPtr))) {
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "%s", errorCtx.message[0] != '\0' ? errorCtx.message : "PNG decode error");
         png_destroy_read_struct(&pngPtr, &infoPtr, NULL);
-        free(rows);
         uiImageFree(img);
         return 0;
     }
@@ -443,10 +494,14 @@ static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
 
     // Bound the work: profile pictures are icons, not wallpapers.
     if (width < 1 || height < 1 || width > 1600 || height > 1600)
-        png_error(pngPtr, "unsupported profile image size");
+        png_error(pngPtr, "unsupported picture size");
 
     if (bitDepth == 16)
         png_set_strip_16(pngPtr);
+
+    // Packed 1/2/4 bit greyscale is expanded to 8 bits, palettes to RGB and
+    // tRNS chunks to a real alpha channel.
+    png_set_packing(pngPtr);
     png_set_expand(pngPtr);
     png_set_gray_to_rgb(pngPtr);
     png_set_tRNS_to_alpha(pngPtr);
@@ -454,22 +509,25 @@ static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
     // libpng leaves every pass but the last mostly empty, which is what a
     // "blank" profile picture looks like after compositing.
     png_set_interlace_handling(pngPtr);
+
+    // Give a picture without alpha an opaque alpha channel. libpng requires
+    // every transformation to be configured before png_read_update_info(),
+    // which is exactly where the previous two-step version could reject files.
+    hasTransparency = png_get_valid(pngPtr, infoPtr, PNG_INFO_tRNS) ? 1 : 0;
+    if (!(colorType & PNG_COLOR_MASK_ALPHA) && !hasTransparency)
+        png_set_filler(pngPtr, 0xFF, PNG_FILLER_AFTER);
+
     png_read_update_info(pngPtr, infoPtr);
 
-    if (png_get_channels(pngPtr, infoPtr) == 3) {
-        png_set_filler(pngPtr, 0xFF, PNG_FILLER_AFTER);
-        png_read_update_info(pngPtr, infoPtr);
-    }
+    channels = png_get_channels(pngPtr, infoPtr);
+    if (channels != 4)
+        png_error(pngPtr, "unsupported picture format");
 
-    if (png_get_channels(pngPtr, infoPtr) != 4)
-        png_error(pngPtr, "unsupported profile image format");
+    if (png_get_rowbytes(pngPtr, infoPtr) != (png_size_t)width * 4)
+        png_error(pngPtr, "unexpected picture row size");
 
-    img->rgba = (unsigned char *)malloc((size_t)width * height * 4);
+    img->rgba = (unsigned char *)malloc((size_t)width * (size_t)height * 4);
     if (img->rgba == NULL)
-        png_error(pngPtr, "out of memory");
-
-    rows = (png_bytep *)malloc(sizeof(png_bytep) * height);
-    if (rows == NULL)
         png_error(pngPtr, "out of memory");
 
     for (y = 0; y < (int)height; y++)
@@ -480,40 +538,120 @@ static int uiDecodePng(const unsigned char *data, int size, ui_image_t *img)
 
     img->w = (int)width;
     img->h = (int)height;
-    ok = 1;
 
-    free(rows);
     png_destroy_read_struct(&pngPtr, &infoPtr, NULL);
-    return ok;
+
+    LOG("PROFILES_UI Decoded PNG %dx%d (%d bit, colour type %d)\n", img->w, img->h, bitDepth, colorType);
+    return 1;
 }
 
-static unsigned char *uiReadFile(const char *path, int *outSize)
+#define UI_PICTURE_MAX_SIZE (4 * 1024 * 1024)
+
+// Reads a whole profile picture. Some USB stacks do not report a usable size
+// for lseek(SEEK_END); the file is then read by growing the buffer until EOF,
+// so a picture is never rejected just because its size could not be queried.
+static unsigned char *uiReadFile(const char *path, int *outSize, char *errorText, int errorLen)
 {
-    int fd, size;
-    unsigned char *buffer;
+    int fd;
+    int size;
     int total = 0;
+    int capacity;
+    unsigned char *buffer;
 
     *outSize = 0;
+    if (errorText != NULL && errorLen > 0)
+        errorText[0] = '\0';
 
     fd = open(path, O_RDONLY);
-    if (fd < 0)
-        return NULL;
-
-    size = lseek(fd, 0, SEEK_END);
-    if (size <= 0 || size > 4 * 1024 * 1024) {
-        close(fd);
+    if (fd < 0) {
+        LOG("PROFILES_UI Could not open %s\n", path);
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "could not open the file");
         return NULL;
     }
 
+    size = (int)lseek(fd, 0, SEEK_END);
+
+    if (size > 0 && size <= UI_PICTURE_MAX_SIZE) {
+        lseek(fd, 0, SEEK_SET);
+
+        buffer = (unsigned char *)malloc(size);
+        if (buffer == NULL) {
+            close(fd);
+            LOG("PROFILES_UI Out of memory reading %s (%d bytes)\n", path, size);
+            if (errorText != NULL)
+                snprintf(errorText, errorLen, "out of memory (%d bytes)", size);
+            return NULL;
+        }
+
+        while (total < size) {
+            int result = read(fd, buffer + total, size - total);
+            if (result <= 0)
+                break;
+            total += result;
+        }
+
+        close(fd);
+
+        if (total != size) {
+            free(buffer);
+            LOG("PROFILES_UI Short read on %s (%d/%d bytes)\n", path, total, size);
+            if (errorText != NULL)
+                snprintf(errorText, errorLen, "short read (%d of %d bytes)", total, size);
+            return NULL;
+        }
+
+        LOG("PROFILES_UI Read %s (%d bytes)\n", path, size);
+        *outSize = size;
+        return buffer;
+    }
+
+    // Unknown size: grow the buffer while the device returns data.
+    if (size > UI_PICTURE_MAX_SIZE) {
+        close(fd);
+        LOG("PROFILES_UI Picture too large: %s (%d bytes)\n", path, size);
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "file too large (%d bytes)", size);
+        return NULL;
+    }
+
+    LOG("PROFILES_UI %s reports no size; reading until EOF\n", path);
     lseek(fd, 0, SEEK_SET);
-    buffer = (unsigned char *)malloc(size);
+
+    capacity = 64 * 1024;
+    buffer = (unsigned char *)malloc(capacity);
     if (buffer == NULL) {
         close(fd);
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "out of memory");
         return NULL;
     }
 
-    while (total < size) {
-        int result = read(fd, buffer + total, size - total);
+    for (;;) {
+        int result;
+
+        if (total == capacity) {
+            unsigned char *grown;
+
+            if (capacity >= UI_PICTURE_MAX_SIZE)
+                break;
+
+            capacity *= 2;
+            if (capacity > UI_PICTURE_MAX_SIZE)
+                capacity = UI_PICTURE_MAX_SIZE;
+
+            grown = (unsigned char *)realloc(buffer, capacity);
+            if (grown == NULL) {
+                free(buffer);
+                close(fd);
+                if (errorText != NULL)
+                    snprintf(errorText, errorLen, "out of memory");
+                return NULL;
+            }
+            buffer = grown;
+        }
+
+        result = read(fd, buffer + total, capacity - total);
         if (result <= 0)
             break;
         total += result;
@@ -521,13 +659,62 @@ static unsigned char *uiReadFile(const char *path, int *outSize)
 
     close(fd);
 
-    if (total != size) {
+    if (total <= 0) {
         free(buffer);
+        LOG("PROFILES_UI %s is empty\n", path);
+        if (errorText != NULL)
+            snprintf(errorText, errorLen, "empty file");
         return NULL;
     }
 
-    *outSize = size;
+    LOG("PROFILES_UI Read %s (%d bytes, size unknown)\n", path, total);
+    *outSize = total;
     return buffer;
+}
+
+// Resolves, reads and decodes one stored picture and logs each stage, so a
+// failure on real hardware can be traced to the file, the read or the decoder.
+static int uiLoadNamedImage(const char *imageName, ui_image_t *img, char *report, int reportLen)
+{
+    char path[PROFILE_PATH_MAX];
+    char decodeError[96];
+    char readError[96];
+    unsigned char *data;
+    int size = 0;
+    int ok;
+
+    memset(img, 0, sizeof(*img));
+
+    if (report != NULL && reportLen > 0)
+        report[0] = '\0';
+
+    if (!profilesResolveImagePath(imageName, path, sizeof(path))) {
+        LOG("PROFILES_UI Picture %s not found (searched every mass device)\n", imageName);
+        if (report != NULL)
+            snprintf(report, reportLen, "%s not found", imageName);
+        return 0;
+    }
+
+    LOG("PROFILES_UI Loading picture %s from %s\n", imageName, path);
+
+    data = uiReadFile(path, &size, readError, sizeof(readError));
+    if (data == NULL) {
+        if (report != NULL)
+            snprintf(report, reportLen, "%s: %s", path, readError[0] ? readError : "read failed");
+        return 0;
+    }
+
+    ok = uiDecodePng(data, size, img, decodeError, sizeof(decodeError));
+    free(data);
+
+    if (!ok) {
+        LOG("PROFILES_UI Picture %s could not be decoded: %s\n", path, decodeError[0] ? decodeError : "unknown error");
+        if (report != NULL)
+            snprintf(report, reportLen, "%s: %s", path, decodeError[0] ? decodeError : "decode failed");
+        return 0;
+    }
+
+    return 1;
 }
 
 // ----------------------------------------------------------
@@ -645,10 +832,8 @@ static void uiFreeAvatars(void)
 // cached, including failures, so a missing USB file is not re-read every frame.
 static GSTEXTURE *uiAvatarFor(const char *imageName)
 {
-    char path[PROFILE_PATH_MAX];
+    char report[160];
     ui_image_t image;
-    unsigned char *data;
-    int size = 0;
     int i, slot = -1, oldest = 0;
 
     if (imageName == NULL || imageName[0] == '\0')
@@ -680,27 +865,13 @@ static GSTEXTURE *uiAvatarFor(const char *imageName)
     uiAvatars[slot].key[PROFILE_IMAGE_NAME_MAX] = '\0';
     uiAvatars[slot].lastUse = ++uiAvatarTick;
 
-    if (!profilesImagePath(imageName, path, sizeof(path))) {
-        LOG("PROFILES_UI Could not resolve profile picture %s\n", imageName);
+    if (!uiLoadNamedImage(imageName, &image, report, sizeof(report))) {
+        LOG("PROFILES_UI Profile picture %s unavailable: %s\n", imageName, report);
         return NULL;
     }
-
-    data = uiReadFile(path, &size);
-    if (data == NULL) {
-        LOG("PROFILES_UI Profile picture missing: %s\n", path);
-        return NULL;
-    }
-
-    memset(&image, 0, sizeof(image));
-    if (!uiDecodePng(data, size, &image)) {
-        LOG("PROFILES_UI Unsupported profile picture: %s\n", path);
-        free(data);
-        return NULL;
-    }
-
-    free(data);
 
     if (!uiBuildAvatarTexture(&uiAvatars[slot].tex, &image, UI_AVATAR_SIZE)) {
+        LOG("PROFILES_UI Could not upload the avatar texture for %s\n", imageName);
         uiImageFree(&image);
         return NULL;
     }
@@ -1082,201 +1253,210 @@ profiles_ui_result_t profilesUiSelect(int *selectedIndex)
 // ----------------------------------------------------------
 // --------------------- Picture chooser --------------------
 // ----------------------------------------------------------
-static int uiImageIndex(const char *imageName)
-{
-    int i;
-    char name[PROFILE_IMAGE_NAME_MAX];
+static void uiFreeThumbnails(void);
 
-    if (imageName == NULL || imageName[0] == '\0')
-        return 0;
-
-    for (i = 1; i <= PROFILE_IMAGE_COUNT; i++) {
-        snprintf(name, sizeof(name), "profile_%d.png", i);
-        if (strcasecmp(name, imageName) == 0)
-            return i - 1;
-    }
-
-    return 0;
-}
-
+// Loads all ten pictures from scratch every time the chooser opens. A failure
+// is logged with the exact reason and retried on the next open, so a stick that
+// was mounted late (or a picture added while the launcher was running) is never
+// permanently remembered as unavailable.
 static void uiLoadThumbnails(void)
 {
     int i;
 
+    uiFreeThumbnails();
+    uiThumbLoaded = 0;
+
+    LOG("PROFILES_UI Picture chooser loading %sprofile_img/profile_1.png .. profile_%d.png\n",
+        profilesGetRoot(), PROFILE_IMAGE_COUNT);
+
     for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
-        char name[PROFILE_IMAGE_NAME_MAX];
-        char path[PROFILE_PATH_MAX];
+        char name[PROFILE_IMAGE_NAME_MAX + 1];
+        char report[160];
         ui_image_t image;
-        unsigned char *data;
-        int size = 0;
 
-        if (uiThumbState[i] != 0)
+        if (!profilesGridSlotImage(i, name, sizeof(name))) {
+            uiThumbState[i] = -1;
             continue;
+        }
 
-        uiThumbState[i] = -1;
-        snprintf(name, sizeof(name), "profile_%d.png", i + 1);
-
-        if (!profilesImagePath(name, path, sizeof(path)))
+        if (!uiLoadNamedImage(name, &image, report, sizeof(report))) {
+            uiThumbState[i] = -1;
+            LOG("PROFILES_UI Picture slot %d unavailable: %s\n", i + 1, report);
             continue;
+        }
 
-        data = uiReadFile(path, &size);
-        if (data == NULL)
-            continue;
-
-        memset(&image, 0, sizeof(image));
-        if (uiDecodePng(data, size, &image)) {
-            if (uiBuildAvatarTexture(&uiThumbs[i], &image, UI_THUMB_SIZE))
-                uiThumbState[i] = 1;
-            else
-                uiFreeTexture(&uiThumbs[i]);
+        if (!uiBuildAvatarTexture(&uiThumbs[i], &image, UI_THUMB_SIZE)) {
+            uiThumbState[i] = -1;
+            LOG("PROFILES_UI Picture slot %d: texture upload failed\n", i + 1);
+        } else {
+            uiThumbState[i] = 1;
+            uiThumbLoaded++;
+            LOG("PROFILES_UI Picture slot %d ready (%s)\n", i + 1, name);
         }
 
         uiImageFree(&image);
-        free(data);
     }
+
+    // The default tile always works: it selects the embedded user.png.
+    uiThumbState[PROFILE_GRID_DEFAULT_SLOT] = 1;
+
+    LOG("PROFILES_UI Picture chooser: %d of %d custom pictures available\n", uiThumbLoaded, PROFILE_IMAGE_COUNT);
 }
 
 static void uiFreeThumbnails(void)
 {
     int i;
 
-    for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
+    for (i = 0; i < PROFILE_GRID_TILE_COUNT; i++) {
         uiFreeTexture(&uiThumbs[i]);
         uiThumbState[i] = 0;
     }
+
+    uiThumbLoaded = 0;
 }
 
-// True when profile_<index + 1>.png was found, decoded and turned into a
-// texture. Only these slots can be confirmed, so the cursor must never rest on
-// a slot the USB stick does not provide.
-static int uiThumbnailAvailable(int index)
+// True when a tile can be selected: a decoded picture, or the default tile.
+static int uiThumbnailAvailable(int slot)
 {
-    return index >= 0 && index < PROFILE_IMAGE_COUNT &&
-           uiThumbState[index] == 1 && uiThumbs[index].Mem != NULL;
+    if (slot < 0 || slot >= PROFILE_GRID_TILE_COUNT)
+        return 0;
+
+    if (slot == PROFILE_GRID_DEFAULT_SLOT)
+        return 1;
+
+    return uiThumbState[slot] == 1 && uiThumbs[slot].Mem != NULL;
 }
 
-static int uiThumbnailStep(int focus, int step)
-{
-    int next = focus + step;
-
-    while (next >= 0 && next < PROFILE_IMAGE_COUNT) {
-        if (uiThumbnailAvailable(next))
-            return next;
-        next += step;
-    }
-
-    return focus;
-}
-
-static int uiThumbnailFirstAvailable(void)
+static void uiThumbnailAvailability(unsigned char *map)
 {
     int i;
 
-    for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
-        if (uiThumbnailAvailable(i))
-            return i;
-    }
-
-    return -1;
+    for (i = 0; i < PROFILE_GRID_TILE_COUNT; i++)
+        map[i] = uiThumbnailAvailable(i) ? 1 : 0;
 }
 
 int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
 {
-    int focus = uiImageIndex(currentImage);
-    float animPos = (float)focus;
+    unsigned char available[PROFILE_GRID_TILE_COUNT];
+    int focus = profilesGridSlotFromImage(currentImage);
+    float animPos;
     int result = 0;
     int done = 0;
 
+    if (out == NULL || outLen < 1)
+        return 0;
+
+    if (focus < 0)
+        focus = 0;
+
     uiLoadThumbnails();
+    uiThumbnailAvailability(available);
 
     // Start on a picture that actually exists, not on an empty slot.
-    if (!uiThumbnailAvailable(focus)) {
-        int available = uiThumbnailFirstAvailable();
+    if (!available[focus]) {
+        int first = profilesGridFirstAvailable(available);
 
-        if (available >= 0) {
-            focus = available;
-            animPos = (float)focus;
-        }
+        if (first >= 0)
+            focus = first;
     }
 
+    animPos = (float)focus;
+
     while (!done) {
-        int i;
+        int slot;
+        char hint[192];
 
         animPos = uiEaseTowards(animPos, (float)focus);
 
         uiFrameBegin();
         uiDrawTitles("Choose a Profile Picture", NULL, uiFontSub);
 
-        for (i = 0; i < PROFILE_IMAGE_COUNT; i++) {
-            int column = i % 5;
-            int row = i / 5;
-            float distance = (float)i - animPos;
+        for (slot = 0; slot < PROFILE_GRID_TILE_COUNT; slot++) {
+            int row, col, size, x, y;
+            float distance = (float)slot - animPos;
             float t;
-            int size, x, y;
+
+            profilesGridSlotPos(slot, &row, &col);
+            if (row < 0 || col < 0)
+                continue;
 
             if (distance < 0.0f)
                 distance = -distance;
             t = uiSmoothStep(1.0f - distance);
 
             size = uiD(140) + uiRound((float)uiD(32) * t);
-            x = uiX(UI_DW / 2 + (column - 2) * 166);
-            y = uiY(252 + row * 172);
+            x = uiX(UI_DW / 2 + (col - 2) * 166);
+            // Three rows: the ten pictures and, centered below them, the
+            // default user.png tile. Kept clear of the caption and the logo.
+            y = uiY(224 + row * 152);
 
             uiDrawDisc(x, y, size);
 
-            if (uiThumbState[i] == 1 && uiThumbs[i].Mem) {
-                rmDrawPixmap(&uiThumbs[i], x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
+            if (slot == PROFILE_GRID_DEFAULT_SLOT) {
+                uiDrawDefaultAvatar(x, y, size);
+            } else if (uiThumbState[slot] == 1 && uiThumbs[slot].Mem) {
+                rmDrawPixmap(&uiThumbs[slot], x, y, ALIGN_CENTER, size, size, SCALING_RATIO, uiWhiteTint());
             } else {
                 char label[24];
-                snprintf(label, sizeof(label), "profile_%d.png", i + 1);
+                snprintf(label, sizeof(label), "profile_%d.png", slot + 1);
                 fntRenderString(uiFontTiny, x, y, ALIGN_CENTER, 0, 0, label, uiColor(0xD0, 0xD0, 0xD0, 0x80));
             }
 
             uiDrawRing(x, y, size, t);
         }
 
+        // Name the focused choice under the grid, and explain an empty folder
+        // instead of leaving the user on a screen with no selectable picture.
+        {
+            if (uiThumbLoaded == 0) {
+                snprintf(hint, sizeof(hint), "No profile_N.png found in %s%s/", profilesGetRoot(), PROFILE_IMAGE_DIR);
+                fntRenderString(uiFontTiny, uiX(UI_DW / 2), uiY(640), ALIGN_HCENTER | ALIGN_TOP, 0, 0, hint, uiColor(0xC8, 0xC8, 0xC8, 0x80));
+            } else {
+                char name[PROFILE_IMAGE_NAME_MAX + 1];
+
+                if (!profilesGridSlotImage(focus, name, sizeof(name)))
+                    name[0] = '\0';
+                snprintf(hint, sizeof(hint), "%s    Cross: Select    Circle: Cancel",
+                    name[0] != '\0' ? name : "Default user.png");
+                fntRenderString(uiFontTiny, uiX(UI_DW / 2), uiY(640), ALIGN_HCENTER | ALIGN_TOP, 0, 0, hint, uiColor(0xC8, 0xC8, 0xC8, 0x80));
+            }
+        }
+
         uiDrawLogo();
         uiFrameEnd();
 
         if (getKey(KEY_LEFT)) {
-            if (focus % 5 > 0) {
-                int next = uiThumbnailStep(focus, -1);
-                if (next != focus) {
-                    focus = next;
-                    uiPlayCursor();
-                }
+            int next = profilesGridMove(focus, 0, -1, available);
+            if (next != focus) {
+                focus = next;
+                uiPlayCursor();
             }
         } else if (getKey(KEY_RIGHT)) {
-            if (focus % 5 < 4) {
-                int next = uiThumbnailStep(focus, 1);
-                if (next != focus) {
-                    focus = next;
-                    uiPlayCursor();
-                }
+            int next = profilesGridMove(focus, 0, 1, available);
+            if (next != focus) {
+                focus = next;
+                uiPlayCursor();
             }
         } else if (getKey(KEY_UP)) {
-            if (focus >= 5) {
-                int next = uiThumbnailStep(focus, -5);
-                if (next != focus) {
-                    focus = next;
-                    uiPlayCursor();
-                }
+            int next = profilesGridMove(focus, -1, 0, available);
+            if (next != focus) {
+                focus = next;
+                uiPlayCursor();
             }
         } else if (getKey(KEY_DOWN)) {
-            if (focus < 5) {
-                int next = uiThumbnailStep(focus, 5);
-                if (next != focus) {
-                    focus = next;
-                    uiPlayCursor();
-                }
+            int next = profilesGridMove(focus, 1, 0, available);
+            if (next != focus) {
+                focus = next;
+                uiPlayCursor();
             }
         }
 
         if (uiConfirmPressed()) {
-            if (uiThumbState[focus] == 1) {
-                char name[PROFILE_IMAGE_NAME_MAX];
-                snprintf(name, sizeof(name), "profile_%d.png", focus + 1);
+            char name[PROFILE_IMAGE_NAME_MAX + 1];
+
+            if (available[focus] && profilesGridSlotImage(focus, name, sizeof(name))) {
                 snprintf(out, outLen, "%s", name);
+                LOG("PROFILES_UI Picture chosen: %s\n", name[0] != '\0' ? name : "user.png");
                 sfxPlay(SFX_CONFIRM);
                 result = 1;
                 done = 1;
@@ -1290,6 +1470,11 @@ int profilesUiPictureChooser(const char *currentImage, char *out, int outLen)
     }
 
     uiFreeThumbnails();
+
+    // Drop the cached avatars as well, so the preview of the picture that was
+    // just chosen is read from the stick instead of an older cached texture.
+    uiFreeAvatars();
+
     return result;
 }
 
@@ -1312,7 +1497,9 @@ static void uiTrimName(char *name)
         name[--length] = '\0';
 }
 
-int profilesUiAddUser(char *name, int nameLen, char *image, int imageLen)
+// Shared editor for Add User and Edit User. It only edits the two in/out
+// buffers; validating and storing them stays in profiles.c.
+static int uiUserEditor(const char *title, char *name, int nameLen, char *image, int imageLen)
 {
     // The reference screen has OK highlighted when the screen opens.
     int focus = 2;
@@ -1336,7 +1523,7 @@ int profilesUiAddUser(char *name, int nameLen, char *image, int imageLen)
         uiAvatarFor(image);
 
         uiFrameBegin();
-        uiDrawTitles("Add User", NULL, uiFontSub);
+        uiDrawTitles(title, NULL, uiFontSub);
 
         // Profile picture preview (also the picture button).
         {
@@ -1542,4 +1729,143 @@ void profilesUiMessage(const char *title, const char *message)
 
     labels[0] = "OK";
     uiRunChoice(title, message, labels, 1);
+}
+
+int profilesUiAddUser(char *name, int nameLen, char *image, int imageLen)
+{
+    return uiUserEditor("Add User", name, nameLen, image, imageLen);
+}
+
+int profilesUiEditUser(char *name, int nameLen, char *image, int imageLen)
+{
+    return uiUserEditor("Edit User", name, nameLen, image, imageLen);
+}
+
+// ----------------------------------------------------------
+// ------------ Settings -> Users (profile list) ------------
+// ----------------------------------------------------------
+
+// Edit User / Delete User / Cancel for one profile, using the same modal button
+// row as the other profile dialogs.
+static int uiUserActionMenu(const char *profileName, int *choice)
+{
+    static const char *labels[3] = {"Edit User", "Delete User", "Cancel"};
+    char title[128];
+    int selected;
+
+    snprintf(title, sizeof(title), "%s", profileName != NULL ? profileName : "User");
+    selected = uiRunChoice(title, "Choose an action for this user", labels, 3);
+
+    if (selected < 0)
+        return 0;
+
+    if (choice != NULL)
+        *choice = selected;
+
+    return 1;
+}
+
+int profilesUiUsers(int *selectedIndex, int *action, int *profileIndex)
+{
+    const int visibleRows = 5;
+    int focus = (selectedIndex != NULL) ? *selectedIndex : 0;
+    int first = 0;
+
+    if (action == NULL || profileIndex == NULL)
+        return 0;
+
+    for (;;) {
+        int count = profilesGetCount();
+        int rowStep = uiD(86);
+        int top = uiY(212);
+        int i;
+
+        if (count <= 0)
+            return 0;
+
+        if (focus < 0)
+            focus = 0;
+        if (focus >= count)
+            focus = count - 1;
+
+        if (focus < first)
+            first = focus;
+        if (focus >= first + visibleRows)
+            first = focus - visibleRows + 1;
+        if (first > count - visibleRows)
+            first = count - visibleRows;
+        if (first < 0)
+            first = 0;
+
+        // Load the visible pictures before the frame starts, exactly like the
+        // profile carousel does, so drawing never stalls on the USB stick.
+        for (i = first; i < count && i < first + visibleRows; i++)
+            uiAvatarFor(profilesGetImage(i));
+
+        uiFrameBegin();
+        uiDrawTitles("Users", "Select a user to edit or delete", uiFontSub);
+
+        for (i = first; i < count && i < first + visibleRows; i++) {
+            int y = top + (i - first) * rowStep;
+            int avatarSize = uiD(58);
+            int avatarX = uiX(320);
+            int textX = uiX(368);
+            int focused = (i == focus);
+            GSTEXTURE *avatarTex = uiAvatarFor(profilesGetImage(i));
+
+            uiDrawDisc(avatarX, y, avatarSize);
+
+            if (avatarTex != NULL)
+                rmDrawPixmap(avatarTex, avatarX, y, ALIGN_CENTER, avatarSize, avatarSize, SCALING_RATIO, uiWhiteTint());
+            else
+                uiDrawDefaultAvatar(avatarX, y, avatarSize);
+
+            uiDrawRing(avatarX, y, avatarSize, focused ? 1.0f : 0.0f);
+
+            fntRenderString(focused ? uiFontLabel : uiFontSmall, textX, y, ALIGN_LEFT | ALIGN_VCENTER, 0, 0,
+                profilesGetName(i),
+                focused ? uiColor(0x00, 0xB0, 0xF0, 0x80) : uiColor(255, 255, 255, 0x80));
+        }
+
+        fntRenderString(uiFontTiny, uiX(UI_DW / 2), uiY(648), ALIGN_HCENTER | ALIGN_TOP, 0, 0,
+            "Up/Down: Select    Cross: Options    Circle: Back", uiColor(0xC8, 0xC8, 0xC8, 0x80));
+
+        uiDrawLogo();
+        uiFrameEnd();
+
+        if (selectedIndex != NULL)
+            *selectedIndex = focus;
+
+        if (getKey(KEY_UP)) {
+            focus = (focus > 0) ? focus - 1 : count - 1;
+            uiPlayCursor();
+        } else if (getKey(KEY_DOWN)) {
+            focus = (focus + 1 < count) ? focus + 1 : 0;
+            uiPlayCursor();
+        }
+
+        if (uiConfirmPressed()) {
+            int choice = 2;
+
+            sfxPlay(SFX_CONFIRM);
+
+            if (uiUserActionMenu(profilesGetName(focus), &choice)) {
+                if (choice == 0) {
+                    *action = PROFILES_UI_USERS_EDIT;
+                    *profileIndex = focus;
+                    return 1;
+                }
+                if (choice == 1) {
+                    *action = PROFILES_UI_USERS_DELETE;
+                    *profileIndex = focus;
+                    return 1;
+                }
+            }
+        }
+
+        if (uiBackPressed()) {
+            sfxPlay(SFX_CANCEL);
+            return 0;
+        }
+    }
 }

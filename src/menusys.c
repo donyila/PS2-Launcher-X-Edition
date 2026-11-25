@@ -2382,8 +2382,8 @@ void menuHandleInputMenu()
 #endif
             ps5CopySmbSettingsToTemp();
         }
-        if (gPS5SubSel > 8)
-            gPS5SubSel = 8;
+        if (gPS5SubSel > 9)
+            gPS5SubSel = 9;
 
         if (gPS5ControllerLogVisible) {
             ps5UpdateControllerLiveStatus();
@@ -2636,7 +2636,7 @@ void menuHandleInputMenu()
             }
             if (getKey(KEY_UP)) {
                 sfxPlay(SFX_CURSOR);
-                gPS5SubSel = 7; // Move up to Game Covers at the top
+                gPS5SubSel = 7; // Wrap up to the last settings row (Users)
             }
             if (getKey(KEY_DOWN)) {
                 sfxPlay(SFX_CURSOR);
@@ -2741,7 +2741,46 @@ void menuHandleInputMenu()
                 sfxPlay(SFX_CURSOR);
                 gPS5SubSel = 7;
             }
-        } else if (gPS5SubSel == 7) { // Focus is on Game Covers
+        } else if (gPS5SubSel == 7) { // Focus is on Users
+            if (getKey(KEY_DOWN)) {
+                sfxPlay(SFX_CURSOR);
+                gPS5SubSel = 8;
+            }
+            if (getKey(KEY_UP)) {
+                sfxPlay(SFX_CURSOR);
+                gPS5SubSel = 6;
+            }
+            if (getKeyOn(KEY_CROSS) || getKeyOn(gSelectButton)) {
+                extern int profilesShowManagement(void);
+
+                sfxPlay(SFX_CONFIRM);
+
+                if (!profilesShowManagement())
+                    guiMsgBox("Users are unavailable.\nCheck that the USB device is connected.", 0, NULL);
+
+                // The profile screen owns its own input loop; do not let the
+                // same press also reach the settings page.
+                readPads();
+            }
+        } else if (gPS5SubSel == 8) { // Focus is on Game Covers
+            if (getKeyOn(KEY_LEFT) || getKeyOn(KEY_RIGHT)) {
+                sfxPlay(SFX_CURSOR);
+                gPS5SubSel = 9;
+            }
+            if (getKey(KEY_DOWN)) {
+                sfxPlay(SFX_CURSOR);
+                gPS5SubSel = 0;
+            }
+            if (getKey(KEY_UP)) {
+                sfxPlay(SFX_CURSOR);
+                gPS5SubSel = 7;
+            }
+            if (getKeyOn(KEY_CROSS) || getKeyOn(gSelectButton)) {
+                sfxPlay(SFX_CONFIRM);
+                gPS5CoverDownloadMode = PS5_COVER_DOWNLOAD_MISSING;
+                gPS5CoverDownloadStatus = PS5_COVER_DOWNLOAD_PROMPT;
+            }
+        } else if (gPS5SubSel == 9) { // Focus is on SMB Settings
             if (getKeyOn(KEY_LEFT) || getKeyOn(KEY_RIGHT)) {
                 sfxPlay(SFX_CURSOR);
                 gPS5SubSel = 8;
@@ -2752,25 +2791,7 @@ void menuHandleInputMenu()
             }
             if (getKey(KEY_UP)) {
                 sfxPlay(SFX_CURSOR);
-                gPS5SubSel = 6;
-            }
-            if (getKeyOn(KEY_CROSS) || getKeyOn(gSelectButton)) {
-                sfxPlay(SFX_CONFIRM);
-                gPS5CoverDownloadMode = PS5_COVER_DOWNLOAD_MISSING;
-                gPS5CoverDownloadStatus = PS5_COVER_DOWNLOAD_PROMPT;
-            }
-        } else if (gPS5SubSel == 8) { // Focus is on SMB Settings
-            if (getKeyOn(KEY_LEFT) || getKeyOn(KEY_RIGHT)) {
-                sfxPlay(SFX_CURSOR);
-                gPS5SubSel = 7;
-            }
-            if (getKey(KEY_DOWN)) {
-                sfxPlay(SFX_CURSOR);
-                gPS5SubSel = 0;
-            }
-            if (getKey(KEY_UP)) {
-                sfxPlay(SFX_CURSOR);
-                gPS5SubSel = 0;
+                gPS5SubSel = 8;
             }
             if (getKeyOn(KEY_CROSS) || getKeyOn(gSelectButton)) {
                 extern int gPS5SettingsPage;
@@ -2962,7 +2983,7 @@ void menuHandleInputMain()
                     extern int gPS5SettingsPage;
                     gPS5SettingsPage = 0;
                 }
-                gPS5SubSel = 7;
+                gPS5SubSel = 8; // Game Covers, the first quick action card
             }
             gPS5ActiveTab = 1;
             // Initialize mainMenuCurrent if needed

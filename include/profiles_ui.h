@@ -49,6 +49,24 @@ int profilesUiAddUser(char *name, int nameLen, char *image, int imageLen);
 // was chosen and writes its file name to out, 0 when cancelled.
 int profilesUiPictureChooser(const char *currentImage, char *out, int outLen);
 
+// Edit User screen. name/image are in/out: the caller passes the current values
+// and receives the edited ones. Returns 1 when the user saved, 0 when cancelled.
+// The name is not written to storage here: profiles.c applies the change, so the
+// numeric profile ID and its directory can never move.
+int profilesUiEditUser(char *name, int nameLen, char *image, int imageLen);
+
+// Settings -> Users: a list of every profile with its picture and name, plus the
+// Edit/Delete action menu. Returns 1 when an action was chosen and writes the
+// action and the focused profile index, 0 when the user leaves the screen.
+// The list is rebuilt from the profile index on every call, so callers that
+// deleted a profile must call it again with the same selected index.
+enum {
+    PROFILES_UI_USERS_EDIT = 0,
+    PROFILES_UI_USERS_DELETE
+};
+
+int profilesUiUsers(int *selectedIndex, int *action, int *profileIndex);
+
 // Small modal lists. choice receives the selected entry (0 based) for
 // profilesUiOptions and profilesUiConfirm. Both return 1 when confirmed.
 int profilesUiOptions(const char *profileName, int *choice);

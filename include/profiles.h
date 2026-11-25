@@ -52,7 +52,18 @@ int profilesDeleteProfile(int id);
 int profilesSetProfileImage(int id, const char *imageName);
 
 // Absolute device path of a profile picture: <root>/profile_img/<name>.
+// Returns 1 when the path could be built, without touching the file system.
 int profilesImagePath(const char *imageName, char *path, int pathLen);
+
+// Resolve an existing profile picture. The profile device is tried first, then
+// every other mounted BDM mass device, so a stick whose profile_img/ folder was
+// copied to another USB port (mass0:/profile_img/...) is still found. Returns 1
+// and fills path when the file exists, 0 otherwise (path is left empty).
+int profilesResolveImagePath(const char *imageName, char *path, int pathLen);
+
+// Settings -> Users: list created profiles and let the user edit or delete one.
+// Returns 1 when the screen was usable, 0 when profiles are unavailable.
+int profilesShowManagement(void);
 
 // Select the physical PlayStation 2 Memory Card in Slot 1 as the save
 // destination. Clears the active profile and disables the profile VMC
